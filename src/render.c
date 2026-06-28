@@ -1,87 +1,56 @@
-#include "common.h"
+#include "tart.h"
 
-// what are suckless, best practices when it comes to block comments at the head of a .c or .h files?
+void render(App *app) {
+    clear();
 
-WINDOW *game_win = NULL;
-static int last_lines = 0;
-static int last_cols = 0;
+    /* === Top Menu Bar === */
+    attron(A_REVERSE);
+    mvprintw(0, 0, " File  Edit  View  Layer  Window  Help ");
+    attroff(A_REVERSE);
 
-void resize_game_window(void) {
-    // only resize if terminal size actually changed
-    if (LINES == last_lines && COLS == last_cols && game_win != NULL)
-        return;
-
-    last_lines = LINES;
-    last_cols = COLS;
-
-    // delete old window if it exists
-    if (game_win != NULL) {
-        delwin(game_win);
-        game_win = NULL;
+    /* === Top Ruler (X) === */
+    mvprintw(1, 4, "0");
+    for (int x = 10; x <= 110; x += 10) {
+        mvprintw(1, x + 1, "%3d", x);
     }
 
-    // calculate new dynamic size with margins
-    int height = LINES - 2;
-    int width  = COLS  - 2;
+    /* === Left Tool / Ruler Area === */
+    attron(A_BOLD);
+    mvprintw(3, 1, "curr");
+    mvprintw(4, 1, "tool");
+    attroff(A_BOLD);
 
-    if (height < 10) height = 10;
-    if (width  < 20) width  = 20;
+    for (int y = 2; y < LINES - 3; y++) {
+        int doc_y = y - 2 + app->viewport.offset_y;
+        mvprintw(y, 0, "%3d|", doc_y);
+    }
 
-    int starty = (LINES - height) / 2;
-    int startx = (COLS  - width)  / 2;
+    /* === Main Canvas / Workspace === */
+    int canvas_start_x = 6;
+    int canvas_start_y = 2;
 
-    game_win = newwin(height, width, starty, startx);
-    box(game_win, 0, 0);
-}
+    // Workspace border
+    attron(COLOR_PAIR(1) | A_DIM);
+    for (int y = canvas_start_y; y < LINES - 2; y++) {
+        mvaddch(y, canvas_start_x - 1, '|');
+    }
+    attroff(COLOR_PAIR(1) | A_DIM);
 
-void render_init(void) {
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    nodelay(stdscr, TRUE);
-    curs_set(0);
-
-    resize_game_window();
-    wrefresh(game_win);
-}
-
-void render_frame(void) {
-    // Check for resize every frame
-    resize_game_window();
-
-    werase(game_win);
-    box(game_win, 0, 0);
-
-    int maxy = getmaxy(game_win);
-    int maxx = getmaxx(game_win);
-
-    // Main content
-    mvwprintw(game_win, 2, 2, "TermScape - Press Q to quit");
-
-    if (show_debug) {
-        // Debug header
-        mvwprintw(game_win, 2, maxx - 20, "DEBUG MODE");
-
-        // Corner coordinates
-        mvwprintw(game_win, 1, 1,                  "(%d,%d)", 0, 0);
-        mvwprintw(game_win, 1, maxx - 8,           "(%d,%d)", 0, maxx - 1);
-        mvwprintw(game_win, maxy - 2, 1,           "(%d,%d)", maxy - 1, 0);
-        mvwprintw(game_win, maxy - 2, maxx - 8,    "(%d,%d)", maxy - 1, maxx - 1);
-
-        // Debug info
-        mvwprintw(game_win, 4, 2, "show_debug = %s", show_debug ? "true" : "false");
-        mvwprintw(game_win, 5, 2, "Press F1 to toggle");
-        mvwprintw(game_win, 7, 2, "Terminal: %d x %d", COLS, LINES);
-
-        // Simple coordinate grid
-        for (int x = 5; x < maxx; x += 5) {
-            mvwprintw(game_win, 0, x, "%d", x);
-        }
-        for (int y = 2; y < maxy; y += 2) {
-            mvwprintw(game_win, y, 0, "%d", y);
+    // Placeholder content (grid)
+    for (int dy = 0; dy < 30 && (canvas_start_y + dy) < LINES - 2; dy++) {
+        for (int dx = 0; dx < 100 && (canvas_start_x + dx) < COLS; dx++) {
+            int world_x = dx + app->viewport.offset_x;
+            int world_y = dy + app->viewport.offset_y;
+            char ch = (world_x % 10 == 0 && world_y % 5 == 0) ? '+' : '.';
+            mvaddch(canvas_start_y + dy, canvas_start_x + dx, ch);
         }
     }
 
-    wrefresh(game_win);
+    /* === Status Bar === */
+    mvprintw(LINES - 1, 0, 
+        "Cursor: (%d, %d)  |  Offset: (%d, %d)  |  Workspace Size  |  q=quit  Middle-drag to pan",
+        app->viewport.cursor_doc_x, app->viewport.cursor_doc_y,
+        app->viewport.offset_x, app->viewport.offset_y);
+
+    refresh();
 }
