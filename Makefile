@@ -2,7 +2,7 @@ CC     = clang
 CFLAGS = -std=c99 -Wall -Werror -fsanitize=address -g -Iinclude
 LIBS   = -lncursesw -ltinfo
 
-SRC    = main.c canvas.c render.c input.c
+SRC    = main.c
 OBJ    = $(SRC:.c=.o)
 TARGET = tart
 
