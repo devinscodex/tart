@@ -2,15 +2,24 @@
 #define TART_H
 
 #include <ncurses.h>
+#include <stdbool.h>
 
 #define MAX_CANVAS_WIDTH  512
 #define MAX_CANVAS_HEIGHT 256
 
+typedef enum {
+    TOOL_PENCIL = 0,
+    TOOL_ERASER,
+    TOOL_SELECT,
+    TOOL_MOVE,
+    TOOL_BRUSH,
+    TOOL_COUNT
+} Tool;
+
 typedef struct {
     int width;
     int height;
-    char *cells; // flat array of characters (row-major)
-    // Later: attr_t *attrs; for colors / styles
+    char *cells;
 } Canvas;
 
 typedef struct {
@@ -25,6 +34,12 @@ typedef struct {
     Canvas canvas;
     Viewport viewport;
     int running;
+    Tool active_tool;
+    int sidebar_width;
+    bool dragging_sidebar;
+    bool mouse_down;
+    int last_mouse_x;
+    int last_mouse_y;
 } App;
 
 /* Function declarations */
@@ -36,5 +51,6 @@ void cleanup_canvas(Canvas *c);
 
 void render(App *app);
 void handle_input(App *app);
+const char* tool_name(Tool t);
 
 #endif
