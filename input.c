@@ -14,7 +14,7 @@ void show_help() {
     printw("\nView & Pan:\n");
     printw("  Arrows        Pan viewport (single step)\n");
     printw("  v             Toggle pan mode (then Left drag to pan)\n");
-    printw("  Wheel         Vertical pan (Shift+Wheel = horizontal)\n");
+    printw("  Wheel         Vertical (or horizontal while in pan mode)\n");
     printw("  Home          Reset view to (0,0) + padding\n");
     printw("  End           Bottom-right corner of canvas\n");
     printw("\nDraw & Tools:\n");
@@ -24,20 +24,23 @@ void show_help() {
     printw("  Ctrl+E        Enter command mode (type q / help / binds)\n");
     printw("  F1            This help screen\n");
     printw("  q             Quit\n\n");
-    printw("Active mouse tracking: Mouse[] shows live mouse world position (canvas 0,0) as you move the mouse.\n");
-    printw("Dead space: simple grid fills all area outside canvas.\n");
+    printw("Active mouse tracking: Mouse[] shows live mouse world position (canvas 0,0) as you move.\n");
+    printw("Best results in xterm/Alacritty/Kitty.  Dead space uses simple grid.\n");
     printw("Press any key (keyboard only) to close...");
     refresh();
+
+    timeout(-1);                    // block so help stays visible
     int c;
     do {
         c = getch();
-    } while (c == KEY_MOUSE);
+    } while (c == KEY_MOUSE || c == ERR);
+    timeout(50);                    // restore responsive loop
 }
 
 void handle_input(App *app) {
     int ch = getch();
     if (ch == ERR) {
-        return;  // timeout or no input - loop will re-render soon for live feel
+        return;
     }
 
     bool vim_cursor_moved = false;
@@ -207,15 +210,16 @@ void handle_input(App *app) {
                 app->viewport.last_mouse_screen_y = sy;
             }
 
+            // Wheel: vertical normally, horizontal while in pan mode (no SHIFT dependency)
             if (event.bstate & BUTTON4_PRESSED) {
-                if (event.bstate & BUTTON_SHIFT) {
+                if (app->viewport.is_dragging) {
                     app->viewport.offset_x -= 4;
                 } else {
                     app->viewport.offset_y -= 4;
                 }
             }
             if (event.bstate & BUTTON5_PRESSED) {
-                if (event.bstate & BUTTON_SHIFT) {
+                if (app->viewport.is_dragging) {
                     app->viewport.offset_x += 4;
                 } else {
                     app->viewport.offset_y += 4;

@@ -95,6 +95,7 @@ void init_app(App *app) {
     nodelay(stdscr, TRUE);
     timeout(50);
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+    printf("\033[?1003h");   // force full active mouse motion tracking (DECSET 1003)
     mouseinterval(0);
     start_color();
     init_pair(1, COLOR_CYAN, COLOR_BLACK);
