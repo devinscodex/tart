@@ -3,7 +3,7 @@
 void show_help() {
     clear();
     printw("TART - Terminal ASCII Rendering Tool (+ VIM learning)\n\n");
-    printw("MODE: n=normal | c=command | p=pan\n\n");
+    printw("MODE: n=normal | c=command | p=pan (View)\n\n");
     printw("VIM motions (cursor highlight + auto follow, can roam workspace):\n");
     printw("  h j k l     Move cursor highlight one cell\n");
     printw("  w / b       Move cursor highlight +5 / -5 horizontally\n");
@@ -13,8 +13,8 @@ void show_help() {
     printw("  PageUp / PageDn   Pan view full page\n");
     printw("\nView & Pan:\n");
     printw("  Arrows        Pan viewport (single step)\n");
-    printw("  v             Toggle pan mode (then Left drag to pan)\n");
-    printw("  Wheel         Vertical (or horizontal while in pan mode)\n");
+    printw("  v             Toggle View/Pan mode (mouse move pans canvas)\n");
+    printw("  Wheel         Vertical scroll (shift+wheel = horizontal in normal)\n");
     printw("  Home          Reset view to (0,0) + padding\n");
     printw("  End           Bottom-right corner of canvas\n");
     printw("\nDraw & Tools:\n");
@@ -22,19 +22,20 @@ void show_help() {
     printw("  p / e             Pencil / Eraser\n");
     printw("\nOther:\n");
     printw("  Ctrl+E        Enter command mode (type q / help / binds)\n");
-    printw("  F1            This help screen\n");
+    printw("  F1            This help screen (always the cheatsheet)\n");
     printw("  q             Quit\n\n");
+    printw("Modes mirror Vim for learning: Normal (draw + hjkl nav), View/Pan (like visual), Command (ex-style).\n");
     printw("Active mouse tracking: Mouse[] shows live mouse world position (canvas 0,0) as you move.\n");
-    printw("Best results in xterm/Alacritty/Kitty.  Dead space uses simple grid.\n");
+    printw("Dead space: simple grid fills all area outside canvas.\n");
     printw("Press any key (keyboard only) to close...");
     refresh();
 
-    timeout(-1);                    // block so help stays visible
+    timeout(-1);
     int c;
     do {
         c = getch();
     } while (c == KEY_MOUSE || c == ERR);
-    timeout(50);                    // restore responsive loop
+    timeout(50);
 }
 
 void handle_input(App *app) {
@@ -192,6 +193,11 @@ void handle_input(App *app) {
                 app->viewport.vim_cursor_y = wy;
                 app->viewport.cursor_doc_x = wx;
                 app->viewport.cursor_doc_y = wy;
+
+                if (app->viewport.last_mouse_screen_x == 0 && app->viewport.last_mouse_screen_y == 0) {
+                    app->viewport.last_mouse_screen_x = sx;
+                    app->viewport.last_mouse_screen_y = sy;
+                }
             }
 
             if (event.bstate & BUTTON1_PRESSED) {
@@ -202,27 +208,23 @@ void handle_input(App *app) {
             }
 
             if ((event.bstate & REPORT_MOUSE_POSITION) && app->viewport.is_dragging) {
-                int dx = sx - app->viewport.last_mouse_screen_x;
-                int dy = sy - app->viewport.last_mouse_screen_y;
-                app->viewport.offset_x -= dx;
-                app->viewport.offset_y -= dy;
+                if (app->viewport.last_mouse_screen_x != 0 || app->viewport.last_mouse_screen_y != 0) {
+                    int dx = sx - app->viewport.last_mouse_screen_x;
+                    int dy = sy - app->viewport.last_mouse_screen_y;
+                    app->viewport.offset_x -= dx;
+                    app->viewport.offset_y -= dy;
+                }
                 app->viewport.last_mouse_screen_x = sx;
                 app->viewport.last_mouse_screen_y = sy;
             }
 
-            // Wheel: vertical normally, horizontal while in pan mode (no SHIFT dependency)
-            if (event.bstate & BUTTON4_PRESSED) {
-                if (app->viewport.is_dragging) {
-                    app->viewport.offset_x -= 4;
+            if (event.bstate & BUTTON4_PRESSED || event.bstate & BUTTON5_PRESSED) {
+                int delta = (event.bstate & BUTTON4_PRESSED) ? -4 : 4;
+                bool horizontal = app->viewport.is_dragging || (event.bstate & BUTTON_SHIFT);
+                if (horizontal) {
+                    app->viewport.offset_x += delta;
                 } else {
-                    app->viewport.offset_y -= 4;
-                }
-            }
-            if (event.bstate & BUTTON5_PRESSED) {
-                if (app->viewport.is_dragging) {
-                    app->viewport.offset_x += 4;
-                } else {
-                    app->viewport.offset_y += 4;
+                    app->viewport.offset_y += delta;
                 }
             }
 

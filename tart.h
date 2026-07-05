@@ -95,7 +95,7 @@ void init_app(App *app) {
     nodelay(stdscr, TRUE);
     timeout(50);
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-    printf("\033[?1003h");   // force full active mouse motion tracking (DECSET 1003)
+    printf("\033[?1003h");   // enable full active mouse motion tracking
     mouseinterval(0);
     start_color();
     init_pair(1, COLOR_CYAN, COLOR_BLACK);
@@ -127,6 +127,8 @@ void init_app(App *app) {
 }
 
 void cleanup_app(App *app) {
+    printf("\033[?1003l");   // disable mouse tracking mode
+    fflush(stdout);
     cleanup_canvas(&app->canvas);
     endwin();
 }
