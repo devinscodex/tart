@@ -13,12 +13,10 @@ void show_help() {
     printw("  PageUp / PageDn   Pan view full page\n");
     printw("\nView & Pan:\n");
     printw("  Arrows        Pan viewport (single step)\n");
-    printw("  Space + Left hold & drag   Pan until mouse release\n");
+    printw("  v             Toggle pan mode (then Left drag to pan)\n");
     printw("  Wheel         Vertical pan (Shift+Wheel = horizontal)\n");
     printw("  Home          Reset view to (0,0) + padding\n");
     printw("  End           Bottom-right corner of canvas\n");
-    printw("  Ctrl+Home     Exact workspace origin\n");
-    printw("  Ctrl+End      Far bottom-right of workspace\n");
     printw("\nDraw & Tools:\n");
     printw("  Left click/drag   Draw continuous line (pencil/eraser)\n");
     printw("  p / e             Pencil / Eraser\n");
@@ -26,7 +24,7 @@ void show_help() {
     printw("  Ctrl+E        Enter command mode (type q / help / binds)\n");
     printw("  F1            This help screen\n");
     printw("  q             Quit\n\n");
-    printw("Active mouse tracking: Mouse[] shows live mouse world position (canvas 0,0) on movement.\n");
+    printw("Active mouse tracking: Mouse[] shows live mouse world position (canvas 0,0) as you move the mouse.\n");
     printw("Dead space: simple grid fills all area outside canvas.\n");
     printw("Press any key (keyboard only) to close...");
     refresh();
@@ -38,6 +36,10 @@ void show_help() {
 
 void handle_input(App *app) {
     int ch = getch();
+    if (ch == ERR) {
+        return;  // timeout or no input - loop will re-render soon for live feel
+    }
+
     bool vim_cursor_moved = false;
 
     if (ch == 'q' || ch == 'Q') {
@@ -93,7 +95,7 @@ void handle_input(App *app) {
         app->viewport.current_brush = ' ';
     } else if (ch == 'p' || ch == 'P') {
         app->viewport.current_brush = '#';
-    } else if (ch == ' ') {
+    } else if (ch == 'v' || ch == 'V') {
         app->viewport.is_dragging = !app->viewport.is_dragging;
         app->viewport.mode = app->viewport.is_dragging ? 'p' : 'n';
     } else if (ch == 'h') {
@@ -195,8 +197,6 @@ void handle_input(App *app) {
                     app->viewport.last_mouse_screen_y = sy;
                 }
             }
-            if (event.bstate & BUTTON1_RELEASED) {
-            }
 
             if ((event.bstate & REPORT_MOUSE_POSITION) && app->viewport.is_dragging) {
                 int dx = sx - app->viewport.last_mouse_screen_x;
@@ -208,12 +208,18 @@ void handle_input(App *app) {
             }
 
             if (event.bstate & BUTTON4_PRESSED) {
-                if (event.bstate & BUTTON_SHIFT) app->viewport.offset_x -= 4;
-                else app->viewport.offset_y -= 4;
+                if (event.bstate & BUTTON_SHIFT) {
+                    app->viewport.offset_x -= 4;
+                } else {
+                    app->viewport.offset_y -= 4;
+                }
             }
             if (event.bstate & BUTTON5_PRESSED) {
-                if (event.bstate & BUTTON_SHIFT) app->viewport.offset_x += 4;
-                else app->viewport.offset_y += 4;
+                if (event.bstate & BUTTON_SHIFT) {
+                    app->viewport.offset_x += 4;
+                } else {
+                    app->viewport.offset_y += 4;
+                }
             }
 
             if (sx < CANVAS_START_X && sy >= 3 && sy < LINES - 1) {
