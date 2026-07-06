@@ -873,16 +873,21 @@ void tart_flood_fill(App *app, int x, int y) {
     unsigned char from_col = c->colors[y * w + x];
     if (!vp->fill_random && from_ch == vp->fill_char && from_col == vp->current_color) return;
 
+    /* Random mode rolls each cell from the palette category containing
+     * fill_char; chars in no category (like the default '#') would leave
+     * the set empty and quietly degrade to a fixed fill, so fall back to
+     * the Standard row - random must always visibly do something. */
     const wchar_t *set = NULL;
     int set_len = 0;
     if (vp->fill_random) {
         for (size_t i = 0; i < TART_PALETTE_CAT_COUNT; i++) {
             if (wcschr(TART_PALETTE[i].chars, vp->fill_char)) {
                 set = TART_PALETTE[i].chars;
-                set_len = (int)wcslen(set);
                 break;
             }
         }
+        if (!set) set = TART_PALETTE[0].chars;
+        set_len = (int)wcslen(set);
     }
 
     /* Iterative fill with an explicit stack; visited[] (marked at push time)
