@@ -58,10 +58,11 @@ Two worked examples live in `examples/`:
 - **`walk.tart`** — a stick figure's 4-key-frame walk cycle over a ground
   layer, no color. Open it in a text editor first: you can see each frame's
   pose directly in the file. The four keys are the classic pair of poses,
-  twice: **contact** (full stride, arms open `/|\`), **passing** (upright on
-  one leg, rear foot trailing), contact again with the arm swing reversed
-  (`\|/`), passing with the front foot reaching. Any walk reads as a walk
-  with just these four.
+  twice: **contact** (full stride), **passing**, contact with the arm swing
+  reversed, passing on the other leg. Each leg is a single character whose
+  glyph is the leg's *state* (Stone Story style): `/` `\` striding, `|`
+  planted, `)` heel trailing, `(` swinging through. Any walk reads as a
+  walk with just these four frames and five glyphs.
 - **`campfire.tart`** — 4 flame flicker frames over a static scene, with a
   `COLOR` block on the flame layer only (yellow tips → orange → red base).
 
