@@ -30,8 +30,9 @@ by a small margin.
 | | |
 |---|---|
 | Tools | `d` draw, `e` eraser, `r` rect, `s` select, `m` move |
+| Shapes | `L` line, `C` curve (drag ends, then click to set the bend), `E` ellipse, `T` triangle — `Esc` cancels a half-built shape |
 | Brush | `t` char palette, `-`/`=` size, `Tab` shape, `f` rect-fill, `c` move cut/stamp |
-| Edit | `u` undo, `U` redo (one step per stroke/stamp; structural ops reset history) |
+| Edit | `u` undo, `U` redo, `H` history viewer (`Up`/`Down` walk the timeline live) — one step per stroke/stamp; structural ops reset history |
 | Color | `[`/`]` quick palette, click the Color row for the HSL picker |
 | Frames | `n`/`N` next/prev, `a` add blank, `A` duplicate, `x` delete, `Enter` play/stop, `o` onion skin, `:fps N` |
 | Layers | `{`/`}` prev/next, `:layer-add` / `:layer-del` (or the Layer menu) |
@@ -80,6 +81,12 @@ The keyframe workflow, using the walk as the model:
    spacing between poses — big jumps read as fast motion, small ones slow.
 5. `Enter` to play, `:fps N` to tune the speed (a 4-frame walk sits well at
    6–10 fps), `Enter` again to stop.
+
+Shape-tool notes: ellipse and triangle fit the dragged bounding box, and
+terminal cells are roughly 2:1 (tall), so a round-looking circle needs a box
+about twice as wide as it is high. All shapes stamp with the draw tool's
+brush character and current color; the drag preview traces the exact cells
+the commit will paint (both walk `tart_shape_points`).
 
 Tips for game assets:
 

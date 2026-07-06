@@ -25,6 +25,10 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
     switch (action) {
         case PANEL_SELECT_TOOL:
             vp->tool = (TartTool)value;
+            /* A half-built gesture must not survive a tool change - a stale
+             * curve_pending would commit with another tool's semantics. */
+            vp->tool_dragging = false;
+            vp->curve_pending = false;
             break;
         case PANEL_CHAR_OPEN:
             tart_open_palette(app, PALETTE_TARGET_PENCIL);
@@ -168,7 +172,7 @@ static long tart_now_ms(void) {
 }
 
 /* Single dispatch point for every animation-bar action, shared by its click
- * hit-test, the equivalent keys (n/N a d D { } Enter o), the Anim/Layer
+ * hit-test, the equivalent keys (n/N a A x { } Enter o), the Anim/Layer
  * menus, and the ':' commands. */
 static void tart_anim_action(App *app, TartAnimAction action) {
     switch (action) {
@@ -207,6 +211,8 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         tart_undo(app);
     } else if (strcmp(name, "redo") == 0) {
         tart_redo(app);
+    } else if (strcmp(name, "history") == 0) {
+        app->viewport.history_visible = true;
     } else if (strcmp(name, "deselect") == 0) {
         tart_deselect(app);
     } else if (strcmp(name, "reset-view") == 0) {
@@ -270,7 +276,7 @@ static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_
         int y0 = vp->drag_start_wy, y1 = wy;
         if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
         if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
-        tart_undo_push(app);
+        tart_undo_push(app, "rect");
         for (int y = y0; y <= y1; y++) {
             for (int x = x0; x <= x1; x++) {
                 bool border = (x == x0 || x == x1 || y == y0 || y == y1);
@@ -341,7 +347,7 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
         vp->drag_cur_wy = wy;
     }
     if (left_release && vp->tool_dragging) {
-        tart_undo_push(app);
+        tart_undo_push(app, vp->move_cut ? "cut-move" : "stamp");
         for (int y = 0; y < vp->sel_h; y++) {
             for (int x = 0; x < vp->sel_w; x++) {
                 tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
@@ -358,6 +364,72 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
             tart_deselect(app);
         }
         vp->tool_dragging = false;
+    }
+}
+
+/* Plot callback that stamps shape cells onto the active canvas - the commit
+ * twin of render()'s preview callback; both walk tart_shape_points. */
+struct TartShapeCommit { App *app; wchar_t ch; unsigned char color; };
+static void tart_commit_plot(int wx, int wy, void *vctx) {
+    struct TartShapeCommit *c = vctx;
+    tart_draw_at(c->app, wx, wy, c->ch);
+    tart_set_color(c->app, wx, wy, c->color);
+}
+
+/* Line/ellipse/triangle: one drag, stamped on release (rect-style). */
+static void tart_tool_shape(App *app, int wx, int wy, bool left_press, bool left_release) {
+    Viewport *vp = &app->viewport;
+    if (left_press) {
+        vp->tool_dragging = true;
+        vp->drag_start_wx = wx;
+        vp->drag_start_wy = wy;
+    }
+    if (vp->tool_dragging) {
+        vp->drag_cur_wx = wx;
+        vp->drag_cur_wy = wy;
+    }
+    if (left_release && vp->tool_dragging) {
+        struct TartShapeCommit ctx = { app, vp->brush_char, vp->current_color };
+        tart_undo_push(app, (vp->tool == TOOL_LINE)    ? "line" :
+                            (vp->tool == TOOL_ELLIPSE) ? "ellipse" : "triangle");
+        tart_shape_points(vp->tool, vp->drag_start_wx, vp->drag_start_wy, wx, wy, 0, 0,
+                          tart_commit_plot, &ctx);
+        vp->tool_dragging = false;
+    }
+}
+
+/* Curve: two-stage. Stage 1 is a normal drag fixing the endpoints; then
+ * curve_pending holds while the Bezier control point follows the cursor
+ * (live preview in render()), and the next click stamps it. Esc cancels. */
+static void tart_tool_curve(App *app, int wx, int wy, bool left_press, bool left_release) {
+    Viewport *vp = &app->viewport;
+    if (vp->curve_pending) {
+        vp->curve_cx = wx;
+        vp->curve_cy = wy;
+        if (left_press) {
+            struct TartShapeCommit ctx = { app, vp->brush_char, vp->current_color };
+            tart_undo_push(app, "curve");
+            tart_shape_points(TOOL_CURVE, vp->drag_start_wx, vp->drag_start_wy,
+                              vp->drag_cur_wx, vp->drag_cur_wy, wx, wy,
+                              tart_commit_plot, &ctx);
+            vp->curve_pending = false;
+        }
+        return;
+    }
+    if (left_press) {
+        vp->tool_dragging = true;
+        vp->drag_start_wx = wx;
+        vp->drag_start_wy = wy;
+    }
+    if (vp->tool_dragging) {
+        vp->drag_cur_wx = wx;
+        vp->drag_cur_wy = wy;
+    }
+    if (left_release && vp->tool_dragging) {
+        vp->tool_dragging = false;
+        vp->curve_pending = true;
+        vp->curve_cx = wx;
+        vp->curve_cy = wy;
     }
 }
 
@@ -611,7 +683,7 @@ static void tart_apply_mouse(App *app, int sx, int sy,
          * ends. */
         if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
             if (acting && !vp->stroke_open) {
-                tart_undo_push(app);
+                tart_undo_push(app, vp->tool == TOOL_ERASER ? "erase" : "draw");
                 vp->stroke_open = true;
             }
         }
@@ -631,6 +703,14 @@ static void tart_apply_mouse(App *app, int sx, int sy,
                 break;
             case TOOL_MOVE:
                 tart_tool_move(app, wx, wy, left_press, left_release);
+                break;
+            case TOOL_LINE:
+            case TOOL_ELLIPSE:
+            case TOOL_TRI:
+                tart_tool_shape(app, wx, wy, left_press, left_release);
+                break;
+            case TOOL_CURVE:
+                tart_tool_curve(app, wx, wy, left_press, left_release);
                 break;
         }
     }
@@ -760,6 +840,15 @@ void handle_input(App *app) {
         if (ch != KEY_MOUSE) {
             app->viewport.about_visible = false;
         }
+        return;
+    }
+
+    /* The history viewer is live: Up/Down actually run undo/redo while it's
+     * open, moving the "now" marker through the timeline. */
+    if (app->viewport.history_visible) {
+        if (ch == KEY_UP) tart_undo(app);
+        else if (ch == KEY_DOWN) tart_redo(app);
+        else if (ch != KEY_MOUSE) app->viewport.history_visible = false;
         return;
     }
 
@@ -992,20 +1081,44 @@ void handle_input(App *app) {
     if (ch == KEY_F(1) || ch == '?') {
         app->viewport.help_visible = true;
     }
+    /* Tool selection funnels through the panel action so a tool change
+     * always cancels any half-built drag/curve gesture. Shape tools live on
+     * CAPITALS because their lowercase letters are taken (l vim-right,
+     * c move-cut, e eraser, t palette). */
     if (ch == 'd' || ch == 'D') {
-        app->viewport.tool = TOOL_PENCIL;
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_PENCIL);
     }
-    if (ch == 'e' || ch == 'E') {
-        app->viewport.tool = TOOL_ERASER;
+    if (ch == 'e') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_ERASER);
     }
     if (ch == 'r') {
-        app->viewport.tool = TOOL_RECT;
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_RECT);
     }
     if (ch == 's') {
-        app->viewport.tool = TOOL_SELECT;
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_SELECT);
     }
     if (ch == 'm') {
-        app->viewport.tool = TOOL_MOVE;
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_MOVE);
+    }
+    if (ch == 'L') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_LINE);
+    }
+    if (ch == 'C') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_CURVE);
+    }
+    if (ch == 'E') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_ELLIPSE);
+    }
+    if (ch == 'T') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_TRI);
+    }
+    if (ch == 'H') {
+        app->viewport.history_visible = true;
+    }
+    if (ch == 27) {
+        /* Bare Esc in normal mode: abandon any in-flight shape gesture. */
+        app->viewport.tool_dragging = false;
+        app->viewport.curve_pending = false;
     }
     if (ch == 't') {
         tart_apply_panel_action(app, PANEL_CHAR_OPEN, 0);
