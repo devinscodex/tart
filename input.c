@@ -88,9 +88,9 @@ static int tart_menu_mnemonic_index(int c) {
 static void tart_move_cursor(App *app, bool *moved) {
     Viewport *vp = &app->viewport;
     int x_lo = -PAN_VOID_MARGIN;
-    int x_hi = app->canvas.width - 1 + PAN_VOID_MARGIN;
+    int x_hi = app->width - 1 + PAN_VOID_MARGIN;
     int y_lo = -PAN_VOID_MARGIN;
-    int y_hi = app->canvas.height - 1 + PAN_VOID_MARGIN;
+    int y_hi = app->height - 1 + PAN_VOID_MARGIN;
     if (vp->vim_cursor_x < x_lo) vp->vim_cursor_x = x_lo;
     if (vp->vim_cursor_x > x_hi) vp->vim_cursor_x = x_hi;
     if (vp->vim_cursor_y < y_lo) vp->vim_cursor_y = y_lo;
@@ -135,9 +135,9 @@ static void tart_clamp_view(App *app) {
     int view_w = CANVAS_VIEW_W;
     int view_h = CANVAS_VIEW_H;
     int h_lo = -PAN_VOID_MARGIN;
-    int h_hi = (app->canvas.width > view_w) ? (app->canvas.width - view_w + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
+    int h_hi = (app->width > view_w) ? (app->width - view_w + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
     int v_lo = -PAN_VOID_MARGIN;
-    int v_hi = (app->canvas.height > view_h) ? (app->canvas.height - view_h + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
+    int v_hi = (app->height > view_h) ? (app->height - view_h + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
     if (vp->offset_x < h_lo) vp->offset_x = h_lo;
     if (vp->offset_x > h_hi) vp->offset_x = h_hi;
     if (vp->offset_y < v_lo) vp->offset_y = v_lo;
@@ -161,6 +161,36 @@ static bool tart_parse_wh(const char *s, int *w, int *h) {
     return true;
 }
 
+static long tart_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* Single dispatch point for every animation-bar action, shared by its click
+ * hit-test, the equivalent keys (n/N a d D { } Enter o), the Anim/Layer
+ * menus, and the ':' commands. */
+static void tart_anim_action(App *app, TartAnimAction action) {
+    switch (action) {
+        case ANIM_FRAME_PREV: app->cur_frame = (app->cur_frame + app->frame_count - 1) % app->frame_count; break;
+        case ANIM_FRAME_NEXT: app->cur_frame = (app->cur_frame + 1) % app->frame_count; break;
+        case ANIM_FRAME_ADD:  tart_frame_add(app, false); break;
+        case ANIM_FRAME_DUP:  tart_frame_add(app, true); break;
+        case ANIM_FRAME_DEL:  tart_frame_del(app); break;
+        case ANIM_LAYER_PREV: app->cur_layer = (app->cur_layer + app->layer_count - 1) % app->layer_count; break;
+        case ANIM_LAYER_NEXT: app->cur_layer = (app->cur_layer + 1) % app->layer_count; break;
+        case ANIM_LAYER_ADD:  tart_layer_add(app); break;
+        case ANIM_LAYER_DEL:  tart_layer_del(app); break;
+        case ANIM_PLAY:
+            app->playing = !app->playing;
+            app->play_last_ms = tart_now_ms();
+            break;
+        case ANIM_ONION: app->onion = !app->onion; break;
+        case ANIM_FPS:   tart_open_prompt(app, PROMPT_FPS, ""); break;
+        default: break;
+    }
+}
+
 /* Single dispatch point for every named command, reached from the menu bar,
  * the ':' palette, and Alt+letter menu selection alike - arg is the text
  * after the command's first space (e.g. a filename or "WxHeight"), or NULL
@@ -173,6 +203,10 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         app->viewport.help_visible = true;
     } else if (strcmp(name, "about") == 0) {
         app->viewport.about_visible = true;
+    } else if (strcmp(name, "undo") == 0) {
+        tart_undo(app);
+    } else if (strcmp(name, "redo") == 0) {
+        tart_redo(app);
     } else if (strcmp(name, "deselect") == 0) {
         tart_deselect(app);
     } else if (strcmp(name, "reset-view") == 0) {
@@ -182,20 +216,38 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
     } else if (strcmp(name, "resize") == 0) {
         int w, h;
         if (arg && tart_parse_wh(arg, &w, &h)) {
-            tart_resize_canvas(app, w, h);
+            tart_resize_doc(app, w, h);
             tart_clamp_view(app);
         } else {
             tart_open_prompt(app, PROMPT_RESIZE, "");
         }
     } else if (strcmp(name, "save") == 0) {
-        if (arg) tart_save_canvas(app, arg);
+        if (arg) tart_save_doc(app, arg);
         else tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
     } else if (strcmp(name, "load") == 0) {
         if (arg) {
-            if (tart_load_canvas(app, arg)) tart_clamp_view(app);
+            if (tart_load_doc(app, arg)) tart_clamp_view(app);
         } else {
             tart_open_prompt(app, PROMPT_LOAD, "untitled.tart");
         }
+    } else if (strcmp(name, "play") == 0) {
+        tart_anim_action(app, ANIM_PLAY);
+    } else if (strcmp(name, "onion") == 0) {
+        tart_anim_action(app, ANIM_ONION);
+    } else if (strcmp(name, "fps") == 0) {
+        int v;
+        if (arg && sscanf(arg, "%d", &v) == 1 && v >= 1 && v <= 60) app->fps = v;
+        else tart_open_prompt(app, PROMPT_FPS, "");
+    } else if (strcmp(name, "frame-add") == 0) {
+        tart_anim_action(app, ANIM_FRAME_ADD);
+    } else if (strcmp(name, "frame-dup") == 0) {
+        tart_anim_action(app, ANIM_FRAME_DUP);
+    } else if (strcmp(name, "frame-del") == 0) {
+        tart_anim_action(app, ANIM_FRAME_DEL);
+    } else if (strcmp(name, "layer-add") == 0) {
+        tart_anim_action(app, ANIM_LAYER_ADD);
+    } else if (strcmp(name, "layer-del") == 0) {
+        tart_anim_action(app, ANIM_LAYER_DEL);
     }
 }
 
@@ -218,6 +270,7 @@ static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_
         int y0 = vp->drag_start_wy, y1 = wy;
         if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
         if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+        tart_undo_push(app);
         for (int y = y0; y <= y1; y++) {
             for (int x = x0; x <= x1; x++) {
                 bool border = (x == x0 || x == x1 || y == y0 || y == y1);
@@ -288,6 +341,7 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
         vp->drag_cur_wy = wy;
     }
     if (left_release && vp->tool_dragging) {
+        tart_undo_push(app);
         for (int y = 0; y < vp->sel_h; y++) {
             for (int x = 0; x < vp->sel_w; x++) {
                 tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
@@ -364,8 +418,8 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     if (vp->prompt_mode != PROMPT_NONE) return;
 
     if (vp->command_mode) {
-        TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
-        tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+        TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, anim_r, status_r;
+        tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &anim_r, &status_r);
 
         char verb[64];
         tart_command_verb(vp->command_buffer, verb, sizeof(verb));
@@ -496,10 +550,28 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         return;
     }
 
-    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
-    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, anim_r, status_r;
+    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &anim_r, &status_r);
 
     if (left_press && tart_handle_menu_click(app, sx, sy, menu_r)) {
+        vp->last_mouse_screen_x = sx;
+        vp->last_mouse_screen_y = sy;
+        return;
+    }
+
+    /* The anim/status rows sit below the canvas; consume events there so a
+     * click can never fall through and paint a scrolled-out-of-view cell. */
+    if (sy >= anim_r.y) {
+        if (left_press && sy == anim_r.y) {
+            TartAnimItem items[TART_ANIM_MAX_ITEMS];
+            int n = tart_build_anim_bar(app, items);
+            for (int i = 0; i < n; i++) {
+                if (items[i].action != ANIM_NONE && sx >= items[i].x0 && sx <= items[i].x1) {
+                    tart_anim_action(app, items[i].action);
+                    break;
+                }
+            }
+        }
         vp->last_mouse_screen_x = sx;
         vp->last_mouse_screen_y = sy;
         return;
@@ -534,6 +606,16 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         }
     } else {
         bool acting = vp->left_click_held || vp->space_held;
+        /* One undo entry per stroke, not per stamped cell: snapshot when a
+         * draw/erase gesture opens, and let it close when the press/space
+         * ends. */
+        if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
+            if (acting && !vp->stroke_open) {
+                tart_undo_push(app);
+                vp->stroke_open = true;
+            }
+        }
+        if (!acting) vp->stroke_open = false;
         switch (vp->tool) {
             case TOOL_PENCIL:
                 if (acting) tart_stamp(app, wx, wy, vp->brush_size, vp->brush_shape, vp->brush_char, vp->current_color);
@@ -558,6 +640,16 @@ static void tart_apply_mouse(App *app, int sx, int sy,
 }
 
 void handle_input(App *app) {
+    /* Playback advances on wall time, checked once per loop; getch's 50ms
+     * timeout caps the effective playback rate at ~20fps. */
+    if (app->playing && app->frame_count > 1) {
+        long now = tart_now_ms();
+        if (now - app->play_last_ms >= 1000 / app->fps) {
+            app->cur_frame = (app->cur_frame + 1) % app->frame_count;
+            app->play_last_ms = now;
+        }
+    }
+
     int ch = getch();
     if (ch == ERR) {
         return;
@@ -735,20 +827,25 @@ void handle_input(App *app) {
                 case PROMPT_RESIZE: {
                     int w, h;
                     if (tart_parse_wh(vp->prompt_buffer, &w, &h)) {
-                        tart_resize_canvas(app, w, h);
+                        tart_resize_doc(app, w, h);
                         tart_clamp_view(app);
                     }
                     break;
                 }
                 case PROMPT_SAVE:
-                    if (vp->prompt_buffer[0]) tart_save_canvas(app, vp->prompt_buffer);
+                    if (vp->prompt_buffer[0]) tart_save_doc(app, vp->prompt_buffer);
                     break;
                 case PROMPT_LOAD:
-                    if (vp->prompt_buffer[0] && tart_load_canvas(app, vp->prompt_buffer)) tart_clamp_view(app);
+                    if (vp->prompt_buffer[0] && tart_load_doc(app, vp->prompt_buffer)) tart_clamp_view(app);
                     break;
                 case PROMPT_CUSTOM_CHAR: {
                     wchar_t code = (wchar_t)strtol(vp->prompt_buffer, NULL, 16);
                     if (code > 0) vp->brush_char = code;
+                    break;
+                }
+                case PROMPT_FPS: {
+                    int v = atoi(vp->prompt_buffer);
+                    if (v >= 1 && v <= 60) app->fps = v;
                     break;
                 }
                 default:
@@ -876,8 +973,8 @@ void handle_input(App *app) {
         tart_reset_view(app);
     }
     if (ch == KEY_END) {
-        int last_x = app->canvas.width - 1;
-        int last_y = app->canvas.height - 1;
+        int last_x = app->width - 1;
+        int last_y = app->height - 1;
         app->viewport.vim_cursor_x = last_x;
         app->viewport.vim_cursor_y = last_y;
         app->viewport.current_mouse_world_x = last_x;
@@ -895,7 +992,7 @@ void handle_input(App *app) {
     if (ch == KEY_F(1) || ch == '?') {
         app->viewport.help_visible = true;
     }
-    if (ch == 'p' || ch == 'P') {
+    if (ch == 'd' || ch == 'D') {
         app->viewport.tool = TOOL_PENCIL;
     }
     if (ch == 'e' || ch == 'E') {
@@ -937,6 +1034,39 @@ void handle_input(App *app) {
     if (ch == 'v' || ch == 'V') {
         tart_toggle_pan(app);
     }
+    if (ch == 'n') {
+        tart_anim_action(app, ANIM_FRAME_NEXT);
+    }
+    if (ch == 'N') {
+        tart_anim_action(app, ANIM_FRAME_PREV);
+    }
+    if (ch == 'a') {
+        tart_anim_action(app, ANIM_FRAME_ADD);
+    }
+    if (ch == 'A') {
+        tart_anim_action(app, ANIM_FRAME_DUP);
+    }
+    if (ch == 'x') {
+        tart_anim_action(app, ANIM_FRAME_DEL);
+    }
+    if (ch == 'u') {
+        tart_undo(app);
+    }
+    if (ch == 'U') {
+        tart_redo(app);
+    }
+    if (ch == '{') {
+        tart_anim_action(app, ANIM_LAYER_PREV);
+    }
+    if (ch == '}') {
+        tart_anim_action(app, ANIM_LAYER_NEXT);
+    }
+    if (ch == 'o') {
+        tart_anim_action(app, ANIM_ONION);
+    }
+    if (ch == '\n' || ch == KEY_ENTER) {
+        tart_anim_action(app, ANIM_PLAY);
+    }
     if (ch == 'h') {
         app->viewport.vim_cursor_x--;
         tart_move_cursor(app, &vim_cursor_moved);
@@ -962,7 +1092,7 @@ void handle_input(App *app) {
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == '$') {
-        app->viewport.vim_cursor_x = app->canvas.width - 1;
+        app->viewport.vim_cursor_x = app->width - 1;
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'w') {
@@ -974,7 +1104,7 @@ void handle_input(App *app) {
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'G') {
-        app->viewport.vim_cursor_y = app->canvas.height - 1;
+        app->viewport.vim_cursor_y = app->height - 1;
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'g') {

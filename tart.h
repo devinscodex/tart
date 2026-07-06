@@ -4,6 +4,9 @@
 #ifndef _XOPEN_SOURCE_EXTENDED
 #define _XOPEN_SOURCE_EXTENDED
 #endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L    /* clock_gettime for animation playback */
+#endif
 #include <ncursesw/curses.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -12,6 +15,9 @@
 #include <locale.h>
 #include <math.h>
 #include <ctype.h>
+#include <time.h>
+
+#define TART_VERSION "0.3.0"
 
 /* Coordinate convention used throughout: sx/sy name a screen (terminal cell)
  * position; wx/wy name a world (canvas/document) position. offset_x/offset_y
@@ -20,6 +26,8 @@
 
 #define MAX_CANVAS_WIDTH  512
 #define MAX_CANVAS_HEIGHT 256
+#define MAX_FRAMES 128
+#define MAX_LAYERS 8
 
 #ifndef TART_DEFAULT_CANVAS_WIDTH
 #define TART_DEFAULT_CANVAS_WIDTH 120
@@ -34,13 +42,13 @@
 /* Visible canvas viewport size in screen cells. -1 on the width reserves the
  * column the right border renders on (without it, canvas.x + canvas.w lands
  * exactly on COLS, one past the last valid column, so that border would
- * silently never appear); -5 on the height reserves 3 header rows plus one
- * dedicated row each for the bottom border and the status/command bar below
- * it. Kept as macros since several places outside tart_compute_layout need
- * to agree with them exactly (view clamping, End-key centering, page-scroll
- * amounts, ...). */
+ * silently never appear); -6 on the height reserves 3 header rows plus one
+ * dedicated row each for the bottom border, the animation bar, and the
+ * status/command bar. Kept as macros since several places outside
+ * tart_compute_layout need to agree with them exactly (view clamping,
+ * End-key centering, page-scroll amounts, ...). */
 #define CANVAS_VIEW_W (COLS - CANVAS_START_X - 1)
-#define CANVAS_VIEW_H (LINES - 5)
+#define CANVAS_VIEW_H (LINES - 6)
 
 #define TART_RECT(x_, y_, w_, h_) ((TartRect){ .x = (x_), .y = (y_), .w = (w_), .h = (h_) })
 
@@ -59,29 +67,42 @@ static const TartCommand TART_COMMANDS[] = {
     { "quit", "q",     "Quit TART" },
     { "help", "binds", "Show keybindings" },
     { "about", NULL,   "About TART" },
+    { "undo", "u",     "Undo last edit" },
+    { "redo", NULL,    "Redo undone edit" },
     { "deselect", NULL, "Clear current selection" },
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
     { "resize", NULL, "Resize canvas (WxH)" },
-    { "save", NULL, "Save canvas to file" },
-    { "load", NULL, "Load canvas from file" },
+    { "save", NULL, "Save to file" },
+    { "load", NULL, "Load from file" },
+    { "play", NULL, "Play/stop animation" },
+    { "onion", NULL, "Toggle onion skin" },
+    { "fps", NULL, "Set playback FPS" },
+    { "frame-add", "fa", "Add blank frame" },
+    { "frame-dup", "fd", "Duplicate frame" },
+    { "frame-del", NULL, "Delete frame" },
+    { "layer-add", "la", "Add layer" },
+    { "layer-del", NULL, "Delete layer" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
-/* One top-level menu (File/Edit/View/Image/Help): a label plus the command
- * names (from TART_COMMANDS) shown in its dropdown, in order. */
+/* One top-level menu: a label plus the command names (from TART_COMMANDS)
+ * shown in its dropdown, in order. Every label's first letter doubles as
+ * its Alt+<letter> mnemonic, so they must stay unique. */
 typedef struct {
     const char *label;
-    const char *items[3];
+    const char *items[5];
     int item_count;
 } TartMenuDef;
 
 static const TartMenuDef TART_MENUS[] = {
-    { "File",  { "save", "load", "quit" },     3 },
-    { "Edit",  { "deselect" },                 1 },
-    { "View",  { "reset-view", "toggle-pan" }, 2 },
-    { "Image", { "resize" },                   1 },
-    { "Help",  { "help", "about" },             2 },
+    { "File",  { "save", "load", "quit" },              3 },
+    { "Edit",  { "undo", "redo", "deselect" },          3 },
+    { "View",  { "reset-view", "toggle-pan", "onion" }, 3 },
+    { "Image", { "resize" },                            1 },
+    { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
+    { "Layer", { "layer-add", "layer-del" },            2 },
+    { "Help",  { "help", "about" },                     2 },
 };
 #define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
 
@@ -104,7 +125,26 @@ typedef enum {
     PROMPT_SAVE,
     PROMPT_LOAD,
     PROMPT_CUSTOM_CHAR,
+    PROMPT_FPS,
 } TartPromptMode;
+
+/* One region of the animation bar (the frame/layer/playback controls row
+ * between the canvas and the status bar); ANIM_NONE marks plain text. Same
+ * renderer/hit-test pairing idea as TartPanelRow. */
+typedef enum {
+    ANIM_NONE,
+    ANIM_FRAME_PREV, ANIM_FRAME_NEXT, ANIM_FRAME_ADD, ANIM_FRAME_DUP, ANIM_FRAME_DEL,
+    ANIM_LAYER_PREV, ANIM_LAYER_NEXT, ANIM_LAYER_ADD, ANIM_LAYER_DEL,
+    ANIM_PLAY, ANIM_ONION, ANIM_FPS,
+} TartAnimAction;
+
+typedef struct {
+    const char *label;
+    int x0, x1;
+    TartAnimAction action;
+} TartAnimItem;
+
+#define TART_ANIM_MAX_ITEMS 24
 
 /* What clicking a given tool-panel row does; see tart_apply_panel_action.
  * Shared between the panel's own click hit-test and identical keyboard
@@ -199,6 +239,26 @@ typedef struct {
     unsigned char *colors; /* 0 = no color/default; 1-255 = xterm-256 palette index */
 } Canvas;
 
+/* One animation frame: a bottom-to-top stack of same-sized canvases. A cell
+ * whose glyph is a space is transparent - lower layers show through - which
+ * is what lets a character layer sit on top of a background layer. */
+typedef struct {
+    Canvas layers[MAX_LAYERS];
+} Frame;
+
+/* One undo/redo entry: a full snapshot of a single layer canvas, taken just
+ * before an edit gesture (stroke, rect stamp, move paste) touches it.
+ * Structural changes (frame/layer add/del, resize, load) clear both stacks
+ * rather than trying to keep frame/layer indices valid across them. */
+typedef struct {
+    int frame, layer;
+    int width, height;
+    wchar_t *cells;
+    unsigned char *colors;
+} TartUndoState;
+
+#define UNDO_STACK_MAX 64
+
 typedef struct {
     int offset_x;                   /* viewport pan origin, in world coords */
     int offset_y;
@@ -268,6 +328,7 @@ typedef struct {
     char mode;              /* status-bar badge: 'n' normal, 'p' pan, 'c' command */
     bool space_held;
     bool left_click_held;   /* drives "is a draw/pan gesture active" */
+    bool stroke_open;       /* a draw/erase gesture is mid-flight; its undo snapshot is already taken */
     bool help_visible;
     bool about_visible;
 } Viewport;
@@ -280,18 +341,51 @@ typedef struct {
 } TartRect;
 
 typedef struct {
-    Canvas canvas;
+    /* Document: frame_count frames of layer_count layers each (uniform -
+     * adding/deleting a layer touches every frame), every canvas exactly
+     * width x height. All editing applies to cur_frame/cur_layer; rendering
+     * composites cur_frame's whole layer stack. */
+    int width, height;
+    Frame frames[MAX_FRAMES];
+    int frame_count;
+    int layer_count;
+    int cur_frame;
+    int cur_layer;
+
+    /* Playback + animation editing aids. */
+    int fps;            /* playback speed, persisted in the save file */
+    bool playing;
+    bool onion;         /* ghost the previous frame under the current one */
+    long play_last_ms;  /* CLOCK_MONOTONIC ms of the last playback advance */
+
+    TartUndoState undo_stack[UNDO_STACK_MAX];
+    TartUndoState redo_stack[UNDO_STACK_MAX];
+    int undo_count;
+    int redo_count;
+
     Viewport viewport;
     int running;
 } App;
 
 void init_app(App *app);
 void cleanup_app(App *app);
-void init_canvas(Canvas *c, int w, int h);
+bool init_canvas(Canvas *c, int w, int h);
 void cleanup_canvas(Canvas *c);
+Canvas *tart_canvas(App *app);
+wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color);
+bool tart_frame_add(App *app, bool dup);
+void tart_frame_del(App *app);
+bool tart_layer_add(App *app);
+void tart_layer_del(App *app);
+void tart_undo_push(App *app);
+void tart_undo(App *app);
+void tart_redo(App *app);
+void tart_undo_clear(App *app);
 void render(App *app);
 void handle_input(App *app);
-void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *status);
+void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *anim, TartRect *status);
+int tart_build_anim_bar(App *app, TartAnimItem items[TART_ANIM_MAX_ITEMS]);
+void tart_draw_anim_bar(App *app, TartRect anim_r);
 void tart_draw_at(App *app, int world_x, int world_y, wchar_t ch);
 void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, wchar_t ch, unsigned char color);
 bool tart_brush_outline(int dx, int dy, int size, BrushShape shape);
@@ -313,9 +407,9 @@ void tart_draw_about_overlay(App *app);
 void tart_draw_prompt(App *app, TartRect status_r);
 void tart_compute_palette_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_max_chars);
 void tart_draw_palette(App *app);
-bool tart_resize_canvas(App *app, int new_w, int new_h);
-bool tart_save_canvas(App *app, const char *path);
-bool tart_load_canvas(App *app, const char *path);
+bool tart_resize_doc(App *app, int new_w, int new_h);
+bool tart_save_doc(App *app, const char *path);
+bool tart_load_doc(App *app, const char *path);
 void tart_draw_box(int x, int y, int w, int h);
 int tart_command_matches(const char *query, int match_idx[TART_COMMAND_COUNT]);
 void tart_command_verb(const char *buf, char *out, size_t out_sz);
@@ -324,18 +418,197 @@ void tart_command_verb(const char *buf, char *out, size_t out_sz);
 
 #ifdef TART_IMPLEMENTATION
 
-void init_canvas(Canvas *c, int w, int h) {
+bool init_canvas(Canvas *c, int w, int h) {
     c->width = w;
     c->height = h;
     c->cells = malloc(sizeof(wchar_t) * (size_t)w * h);
-    if (c->cells) wmemset(c->cells, L' ', (size_t)w * h);
     c->colors = malloc((size_t)w * h);
-    if (c->colors) memset(c->colors, 0, (size_t)w * h);
+    if (!c->cells || !c->colors) { cleanup_canvas(c); return false; }
+    wmemset(c->cells, L' ', (size_t)w * h);
+    memset(c->colors, 0, (size_t)w * h);
+    return true;
 }
 
 void cleanup_canvas(Canvas *c) {
     if (c->cells) { free(c->cells); c->cells = NULL; }
     if (c->colors) { free(c->colors); c->colors = NULL; }
+}
+
+/* The canvas all editing tools act on: the active layer of the active frame. */
+Canvas *tart_canvas(App *app) {
+    return &app->frames[app->cur_frame].layers[app->cur_layer];
+}
+
+/* Composited view of one frame's layer stack at (x,y): topmost non-space
+ * glyph wins, space is transparent. Caller guarantees bounds. */
+wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color) {
+    for (int l = app->layer_count - 1; l >= 0; l--) {
+        Canvas *c = &app->frames[frame].layers[l];
+        wchar_t ch = c->cells[y * c->width + x];
+        if (ch != L' ') {
+            *out_color = c->colors[y * c->width + x];
+            return ch;
+        }
+    }
+    *out_color = 0;
+    return L' ';
+}
+
+/* Insert a frame right after the current one and switch to it; dup copies
+ * the current frame's layers (the usual animation step), otherwise the new
+ * frame is blank. */
+bool tart_frame_add(App *app, bool dup) {
+    if (app->frame_count >= MAX_FRAMES) return false;
+    Frame nf;
+    memset(&nf, 0, sizeof(nf));
+    for (int l = 0; l < app->layer_count; l++) {
+        if (!init_canvas(&nf.layers[l], app->width, app->height)) {
+            for (int i = 0; i < l; i++) cleanup_canvas(&nf.layers[i]);
+            return false;
+        }
+        if (dup) {
+            Canvas *src = &app->frames[app->cur_frame].layers[l];
+            wmemcpy(nf.layers[l].cells, src->cells, (size_t)app->width * app->height);
+            memcpy(nf.layers[l].colors, src->colors, (size_t)app->width * app->height);
+        }
+    }
+    int at = app->cur_frame + 1;
+    memmove(&app->frames[at + 1], &app->frames[at], (size_t)(app->frame_count - at) * sizeof(Frame));
+    app->frames[at] = nf;
+    app->frame_count++;
+    app->cur_frame = at;
+    tart_undo_clear(app);
+    return true;
+}
+
+void tart_frame_del(App *app) {
+    if (app->frame_count <= 1) return;
+    for (int l = 0; l < app->layer_count; l++) cleanup_canvas(&app->frames[app->cur_frame].layers[l]);
+    memmove(&app->frames[app->cur_frame], &app->frames[app->cur_frame + 1],
+            (size_t)(app->frame_count - app->cur_frame - 1) * sizeof(Frame));
+    app->frame_count--;
+    if (app->cur_frame >= app->frame_count) app->cur_frame = app->frame_count - 1;
+    tart_undo_clear(app);
+}
+
+/* Layer count is uniform across frames, so add/del touch every frame. The
+ * new layer goes directly above the current one and becomes active. Blanks
+ * are staged before any frame is touched so a failed alloc can't leave the
+ * document ragged. */
+bool tart_layer_add(App *app) {
+    if (app->layer_count >= MAX_LAYERS) return false;
+    static Canvas stage[MAX_FRAMES];
+    for (int f = 0; f < app->frame_count; f++) {
+        if (!init_canvas(&stage[f], app->width, app->height)) {
+            for (int i = 0; i < f; i++) cleanup_canvas(&stage[i]);
+            return false;
+        }
+    }
+    int at = app->cur_layer + 1;
+    for (int f = 0; f < app->frame_count; f++) {
+        Frame *fr = &app->frames[f];
+        memmove(&fr->layers[at + 1], &fr->layers[at], (size_t)(app->layer_count - at) * sizeof(Canvas));
+        fr->layers[at] = stage[f];
+    }
+    app->layer_count++;
+    app->cur_layer = at;
+    tart_undo_clear(app);
+    return true;
+}
+
+void tart_layer_del(App *app) {
+    if (app->layer_count <= 1) return;
+    for (int f = 0; f < app->frame_count; f++) {
+        Frame *fr = &app->frames[f];
+        cleanup_canvas(&fr->layers[app->cur_layer]);
+        memmove(&fr->layers[app->cur_layer], &fr->layers[app->cur_layer + 1],
+                (size_t)(app->layer_count - app->cur_layer - 1) * sizeof(Canvas));
+    }
+    app->layer_count--;
+    if (app->cur_layer >= app->layer_count) app->cur_layer = app->layer_count - 1;
+    tart_undo_clear(app);
+}
+
+static void tart_undo_free_state(TartUndoState *u) {
+    free(u->cells);
+    free(u->colors);
+    u->cells = NULL;
+    u->colors = NULL;
+}
+
+static bool tart_undo_snapshot(App *app, int frame, int layer, TartUndoState *out) {
+    Canvas *c = &app->frames[frame].layers[layer];
+    size_t n = (size_t)c->width * c->height;
+    out->frame = frame;
+    out->layer = layer;
+    out->width = c->width;
+    out->height = c->height;
+    out->cells = malloc(sizeof(wchar_t) * n);
+    out->colors = malloc(n);
+    if (!out->cells || !out->colors) { tart_undo_free_state(out); return false; }
+    wmemcpy(out->cells, c->cells, n);
+    memcpy(out->colors, c->colors, n);
+    return true;
+}
+
+/* Push onto a bounded stack; when full the oldest entry falls off. */
+static void tart_undo_stack_push(TartUndoState *stack, int *count, TartUndoState s) {
+    if (*count == UNDO_STACK_MAX) {
+        tart_undo_free_state(&stack[0]);
+        memmove(&stack[0], &stack[1], (UNDO_STACK_MAX - 1) * sizeof(TartUndoState));
+        (*count)--;
+    }
+    stack[(*count)++] = s;
+}
+
+/* Call just before an edit gesture modifies the active canvas: one call =
+ * one undoable step. A fresh edit invalidates the redo stack. */
+void tart_undo_push(App *app) {
+    TartUndoState s;
+    if (!tart_undo_snapshot(app, app->cur_frame, app->cur_layer, &s)) return;
+    tart_undo_stack_push(app->undo_stack, &app->undo_count, s);
+    while (app->redo_count > 0) tart_undo_free_state(&app->redo_stack[--app->redo_count]);
+}
+
+/* Undo and redo are the same swap in opposite directions: pop a snapshot,
+ * save the canvas's present state onto the other stack, restore, and jump
+ * the editor to that frame/layer so the change is visible. */
+static void tart_undo_apply(App *app, TartUndoState *from, int *from_count,
+                            TartUndoState *to, int *to_count) {
+    if (*from_count == 0) return;
+    TartUndoState s = from[*from_count - 1];
+    /* Structure ops clear the stacks, so entries always reference a live
+     * same-sized canvas; guard anyway. */
+    if (s.frame >= app->frame_count || s.layer >= app->layer_count ||
+        s.width != app->width || s.height != app->height) {
+        tart_undo_free_state(&s);
+        (*from_count)--;
+        return;
+    }
+    TartUndoState cur;
+    if (!tart_undo_snapshot(app, s.frame, s.layer, &cur)) return;
+    tart_undo_stack_push(to, to_count, cur);
+
+    Canvas *c = &app->frames[s.frame].layers[s.layer];
+    wmemcpy(c->cells, s.cells, (size_t)s.width * s.height);
+    memcpy(c->colors, s.colors, (size_t)s.width * s.height);
+    app->cur_frame = s.frame;
+    app->cur_layer = s.layer;
+    tart_undo_free_state(&s);
+    (*from_count)--;
+}
+
+void tart_undo(App *app) {
+    tart_undo_apply(app, app->undo_stack, &app->undo_count, app->redo_stack, &app->redo_count);
+}
+
+void tart_redo(App *app) {
+    tart_undo_apply(app, app->redo_stack, &app->redo_count, app->undo_stack, &app->undo_count);
+}
+
+void tart_undo_clear(App *app) {
+    while (app->undo_count > 0) tart_undo_free_state(&app->undo_stack[--app->undo_count]);
+    while (app->redo_count > 0) tart_undo_free_state(&app->redo_stack[--app->redo_count]);
 }
 
 void init_app(App *app) {
@@ -367,7 +640,18 @@ void init_app(App *app) {
         init_pair(16 + i, i, COLOR_BLACK);
     }
 
-    init_canvas(&app->canvas, TART_DEFAULT_CANVAS_WIDTH, TART_DEFAULT_CANVAS_HEIGHT);
+    app->width = TART_DEFAULT_CANVAS_WIDTH;
+    app->height = TART_DEFAULT_CANVAS_HEIGHT;
+    app->frame_count = 1;
+    app->layer_count = 1;
+    app->cur_frame = 0;
+    app->cur_layer = 0;
+    app->fps = 8;
+    app->playing = false;
+    app->onion = false;
+    app->undo_count = 0;
+    app->redo_count = 0;
+    init_canvas(&app->frames[0].layers[0], app->width, app->height);
 
     /* Zero is the correct default for nearly every Viewport field (TOOL_PENCIL,
      * BRUSH_SQUARE, PROMPT_NONE, ... are all 0), so clear the struct and list
@@ -394,11 +678,14 @@ void cleanup_app(App *app) {
     app->viewport.sel_buffer = NULL;
     free(app->viewport.sel_colors);
     app->viewport.sel_colors = NULL;
-    cleanup_canvas(&app->canvas);
+    tart_undo_clear(app);
+    for (int f = 0; f < app->frame_count; f++)
+        for (int l = 0; l < app->layer_count; l++)
+            cleanup_canvas(&app->frames[f].layers[l]);
     endwin();
 }
 
-void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *status) {
+void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *anim, TartRect *status) {
     int lines = LINES;
     int cols = COLS;
     *menu    = TART_RECT(0, 0, cols, 1);
@@ -406,31 +693,36 @@ void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *to
     *tool    = TART_RECT(0, 3, TOOL_PANEL_WIDTH, CANVAS_VIEW_H);
     *y_ruler = TART_RECT(TOOL_PANEL_WIDTH, 3, Y_RULER_WIDTH, CANVAS_VIEW_H);
     *canvas  = TART_RECT(CANVAS_START_X, 3, CANVAS_VIEW_W, CANVAS_VIEW_H);
+    *anim    = TART_RECT(0, lines - 2, cols, 1);
     *status  = TART_RECT(0, lines - 1, cols, 1);
 }
 
 void tart_draw_at(App *app, int world_x, int world_y, wchar_t ch) {
-    if (world_x >= 0 && world_x < app->canvas.width && world_y >= 0 && world_y < app->canvas.height) {
-        app->canvas.cells[world_y * app->canvas.width + world_x] = ch;
+    Canvas *c = tart_canvas(app);
+    if (world_x >= 0 && world_x < c->width && world_y >= 0 && world_y < c->height) {
+        c->cells[world_y * c->width + world_x] = ch;
     }
 }
 
 wchar_t tart_read_cell(App *app, int x, int y) {
-    if (x >= 0 && x < app->canvas.width && y >= 0 && y < app->canvas.height) {
-        return app->canvas.cells[y * app->canvas.width + x];
+    Canvas *c = tart_canvas(app);
+    if (x >= 0 && x < c->width && y >= 0 && y < c->height) {
+        return c->cells[y * c->width + x];
     }
     return L' ';
 }
 
 void tart_set_color(App *app, int x, int y, unsigned char color) {
-    if (x >= 0 && x < app->canvas.width && y >= 0 && y < app->canvas.height) {
-        app->canvas.colors[y * app->canvas.width + x] = color;
+    Canvas *c = tart_canvas(app);
+    if (x >= 0 && x < c->width && y >= 0 && y < c->height) {
+        c->colors[y * c->width + x] = color;
     }
 }
 
 unsigned char tart_read_color(App *app, int x, int y) {
-    if (x >= 0 && x < app->canvas.width && y >= 0 && y < app->canvas.height) {
-        return app->canvas.colors[y * app->canvas.width + x];
+    Canvas *c = tart_canvas(app);
+    if (x >= 0 && x < c->width && y >= 0 && y < c->height) {
+        return c->colors[y * c->width + x];
     }
     return 0;
 }
@@ -536,8 +828,8 @@ void tart_draw_box(int x, int y, int w, int h) {
 void render(App *app) {
     erase();
 
-    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
-    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, anim_r, status_r;
+    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &anim_r, &status_r);
 
     attron(COLOR_PAIR(5));
     mvprintw(menu_r.y, menu_r.x, "%-*s", menu_r.w, "");
@@ -618,10 +910,22 @@ void render(App *app) {
             int color_pair = 0;
             bool is_cursor = (world_x == app->viewport.current_mouse_world_x && world_y == app->viewport.current_mouse_world_y);
 
-            if (world_x >= 0 && world_x < app->canvas.width && world_y >= 0 && world_y < app->canvas.height) {
-                ch_to_draw = app->canvas.cells[world_y * app->canvas.width + world_x];
-                unsigned char cell_color = app->canvas.colors[world_y * app->canvas.width + world_x];
+            if (world_x >= 0 && world_x < app->width && world_y >= 0 && world_y < app->height) {
+                unsigned char cell_color;
+                ch_to_draw = tart_composite(app, app->cur_frame, world_x, world_y, &cell_color);
                 if (cell_color != 0) color_pair = 16 + cell_color;
+                /* Onion skin: where this frame is blank, ghost the previous
+                 * frame's composite in dim monochrome. */
+                if (ch_to_draw == L' ' && app->onion && !app->playing && app->frame_count > 1) {
+                    int prev = (app->cur_frame + app->frame_count - 1) % app->frame_count;
+                    unsigned char ghost_color;
+                    wchar_t ghost = tart_composite(app, prev, world_x, world_y, &ghost_color);
+                    (void)ghost_color;
+                    if (ghost != L' ') {
+                        ch_to_draw = ghost;
+                        attrs |= A_DIM;
+                    }
+                }
             } else {
                 attrs = A_DIM;
                 ch_to_draw = (world_x % 10 == 0 && world_y % 5 == 0) ? L'+' : L'.';
@@ -721,6 +1025,8 @@ void render(App *app) {
         }
     }
 
+    tart_draw_anim_bar(app, anim_r);
+
     if (app->viewport.command_mode) {
         tart_draw_command_palette(app, status_r);
     } else if (app->viewport.prompt_mode != PROMPT_NONE) {
@@ -742,7 +1048,7 @@ void render(App *app) {
         cx += (int)strlen(mode_badge) + 1;
 
         {
-            const char *tool_name = (app->viewport.tool == TOOL_PENCIL) ? "pencil" :
+            const char *tool_name = (app->viewport.tool == TOOL_PENCIL) ? "draw" :
                                      (app->viewport.tool == TOOL_ERASER) ? "eraser" :
                                      (app->viewport.tool == TOOL_RECT)   ? "rect"   :
                                      (app->viewport.tool == TOOL_SELECT) ? "select" : "move";
@@ -766,6 +1072,17 @@ void render(App *app) {
         mvprintw(status_r.y, cx, "cursor[%4d,%4d]", app->viewport.vim_cursor_x, app->viewport.vim_cursor_y);
         attroff(COLOR_PAIR(5));
         cx += 18;
+
+        {
+            char fl[32];
+            int len = snprintf(fl, sizeof(fl), "frm %d/%d lyr %d/%d",
+                               app->cur_frame + 1, app->frame_count,
+                               app->cur_layer + 1, app->layer_count);
+            attron(COLOR_PAIR(5));
+            mvprintw(status_r.y, cx, "%s", fl);
+            attroff(COLOR_PAIR(5));
+            cx += len + 1;
+        }
 
         const char *hint = ": commands   ?/F1 help   q quit";
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
@@ -910,7 +1227,7 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     attroff(A_BOLD);
 
     static const struct { int row; const char *label; TartTool tool; } tools[] = {
-        { TP_ROW_PENCIL, "Pencil", TOOL_PENCIL },
+        { TP_ROW_PENCIL, "Draw",   TOOL_PENCIL },
         { TP_ROW_ERASER, "Eraser", TOOL_ERASER },
         { TP_ROW_RECT,   "Rect",   TOOL_RECT },
         { TP_ROW_SELECT, "Select", TOOL_SELECT },
@@ -922,14 +1239,14 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attron(a);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
         attroff(a);
-        /* Every tool binds to its label's first letter (p/e/r/s/m) - underline
+        /* Every tool binds to its label's first letter (d/e/r/s/m) - underline
          * it so that binding is visible without opening the help overlay. */
         attron(a | A_UNDERLINE);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%c", tools[i].label[0]);
         attroff(a | A_UNDERLINE);
     }
 
-    const char *header = (vp->tool == TOOL_PENCIL) ? "Pencil" :
+    const char *header = (vp->tool == TOOL_PENCIL) ? "Draw" :
                           (vp->tool == TOOL_ERASER) ? "Eraser" :
                           (vp->tool == TOOL_RECT)   ? "Rectangle" :
                           (vp->tool == TOOL_SELECT) ? "Select" : "Move";
@@ -989,6 +1306,62 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attroff(a);
     }
     mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + TP_COLOR_SLIDER_DOT_X0 + (int)TART_BASIC_COLOR_COUNT, ']');
+}
+
+/* Appends one anim-bar item at *x with a two-space gap. disp_w is on-screen
+ * width, which differs from strlen for the UTF-8 │ separators. */
+static int tart_anim_append(TartAnimItem *items, int n, int *x, const char *label, int disp_w, TartAnimAction action) {
+    items[n] = (TartAnimItem){ label, *x, *x + disp_w - 1, action };
+    *x += disp_w + 2;
+    return n + 1;
+}
+
+int tart_build_anim_bar(App *app, TartAnimItem items[TART_ANIM_MAX_ITEMS]) {
+    static char frame_num[24], layer_num[24], fps_num[16];
+    snprintf(frame_num, sizeof(frame_num), "%d/%d", app->cur_frame + 1, app->frame_count);
+    snprintf(layer_num, sizeof(layer_num), "%d/%d", app->cur_layer + 1, app->layer_count);
+    snprintf(fps_num, sizeof(fps_num), "fps %d", app->fps);
+
+    int n = 0, x = 1;
+    n = tart_anim_append(items, n, &x, "frame", 5, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, frame_num, (int)strlen(frame_num), ANIM_NONE);
+    n = tart_anim_append(items, n, &x, "<", 1, ANIM_FRAME_PREV);
+    n = tart_anim_append(items, n, &x, ">", 1, ANIM_FRAME_NEXT);
+    n = tart_anim_append(items, n, &x, "+", 1, ANIM_FRAME_ADD);
+    n = tart_anim_append(items, n, &x, "dup", 3, ANIM_FRAME_DUP);
+    n = tart_anim_append(items, n, &x, "del", 3, ANIM_FRAME_DEL);
+    n = tart_anim_append(items, n, &x, "│", 1, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, "layer", 5, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, layer_num, (int)strlen(layer_num), ANIM_NONE);
+    n = tart_anim_append(items, n, &x, "{", 1, ANIM_LAYER_PREV);
+    n = tart_anim_append(items, n, &x, "}", 1, ANIM_LAYER_NEXT);
+    n = tart_anim_append(items, n, &x, "+", 1, ANIM_LAYER_ADD);
+    n = tart_anim_append(items, n, &x, "del", 3, ANIM_LAYER_DEL);
+    n = tart_anim_append(items, n, &x, "│", 1, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, app->playing ? "stop" : "play", 4, ANIM_PLAY);
+    n = tart_anim_append(items, n, &x, app->onion ? "onion:on" : "onion:off", app->onion ? 8 : 9, ANIM_ONION);
+    n = tart_anim_append(items, n, &x, fps_num, (int)strlen(fps_num), ANIM_FPS);
+    return n;
+}
+
+void tart_draw_anim_bar(App *app, TartRect anim_r) {
+    TartAnimItem items[TART_ANIM_MAX_ITEMS];
+    int n = tart_build_anim_bar(app, items);
+
+    attron(COLOR_PAIR(5));
+    mvprintw(anim_r.y, anim_r.x, "%-*s", anim_r.w, "");
+    attroff(COLOR_PAIR(5));
+
+    for (int i = 0; i < n; i++) {
+        bool active = (items[i].action == ANIM_PLAY && app->playing) ||
+                      (items[i].action == ANIM_ONION && app->onion);
+        attr_t a = active ? (COLOR_PAIR(6) | A_BOLD)
+                 : (items[i].action == ANIM_NONE) ? COLOR_PAIR(5)
+                 : (COLOR_PAIR(5) | A_BOLD);
+        attron(a);
+        mvprintw(anim_r.y, items[i].x0, "%s", items[i].label);
+        attroff(a);
+    }
 }
 
 int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]) {
@@ -1100,6 +1473,7 @@ static const char *tart_prompt_label(TartPromptMode mode) {
         case PROMPT_SAVE:        return "Save as:";
         case PROMPT_LOAD:        return "Load file:";
         case PROMPT_CUSTOM_CHAR: return "Custom char (hex codepoint):";
+        case PROMPT_FPS:         return "Playback FPS (1-60):";
         default:                 return "";
     }
 }
@@ -1248,59 +1622,122 @@ void tart_draw_color_picker(App *app) {
     attroff(COLOR_PAIR(2));
 }
 
-bool tart_resize_canvas(App *app, int new_w, int new_h) {
+/* Resizes one canvas in place, preserving overlapping content. On alloc
+ * failure the canvas is untouched. */
+static bool tart_canvas_resize(Canvas *c, int new_w, int new_h) {
+    wchar_t *new_cells = malloc(sizeof(wchar_t) * (size_t)new_w * new_h);
+    unsigned char *new_colors = malloc((size_t)new_w * new_h);
+    if (!new_cells || !new_colors) { free(new_cells); free(new_colors); return false; }
+    wmemset(new_cells, L' ', (size_t)new_w * new_h);
+    memset(new_colors, 0, (size_t)new_w * new_h);
+
+    int copy_w = (new_w < c->width) ? new_w : c->width;
+    int copy_h = (new_h < c->height) ? new_h : c->height;
+    for (int y = 0; y < copy_h; y++) {
+        wmemcpy(&new_cells[y * new_w], &c->cells[y * c->width], (size_t)copy_w);
+        memcpy(&new_colors[y * new_w], &c->colors[y * c->width], (size_t)copy_w);
+    }
+
+    free(c->cells);
+    free(c->colors);
+    c->cells = new_cells;
+    c->colors = new_colors;
+    c->width = new_w;
+    c->height = new_h;
+    return true;
+}
+
+/* Every frame/layer canvas keeps identical dimensions (the compositor
+ * depends on it), so resize walks the whole document; on a mid-walk alloc
+ * failure the already-resized canvases are put back to the old size before
+ * returning, keeping the invariant. */
+bool tart_resize_doc(App *app, int new_w, int new_h) {
     if (new_w < 1) new_w = 1;
     if (new_h < 1) new_h = 1;
     if (new_w > MAX_CANVAS_WIDTH) new_w = MAX_CANVAS_WIDTH;
     if (new_h > MAX_CANVAS_HEIGHT) new_h = MAX_CANVAS_HEIGHT;
 
-    wchar_t *new_cells = malloc(sizeof(wchar_t) * (size_t)new_w * new_h);
-    if (!new_cells) return false;
-    wmemset(new_cells, L' ', (size_t)new_w * new_h);
-
-    unsigned char *new_colors = malloc((size_t)new_w * new_h);
-    if (!new_colors) { free(new_cells); return false; }
-    memset(new_colors, 0, (size_t)new_w * new_h);
-
-    int copy_w = (new_w < app->canvas.width) ? new_w : app->canvas.width;
-    int copy_h = (new_h < app->canvas.height) ? new_h : app->canvas.height;
-    for (int y = 0; y < copy_h; y++) {
-        wmemcpy(&new_cells[y * new_w], &app->canvas.cells[y * app->canvas.width], (size_t)copy_w);
-        memcpy(&new_colors[y * new_w], &app->canvas.colors[y * app->canvas.width], (size_t)copy_w);
+    int done = 0;
+    for (int f = 0; f < app->frame_count; f++) {
+        for (int l = 0; l < app->layer_count; l++) {
+            if (!tart_canvas_resize(&app->frames[f].layers[l], new_w, new_h)) {
+                for (int i = 0; i < done; i++)
+                    tart_canvas_resize(&app->frames[i / app->layer_count].layers[i % app->layer_count],
+                                       app->width, app->height);
+                return false;
+            }
+            done++;
+        }
     }
-
-    free(app->canvas.cells);
-    free(app->canvas.colors);
-    app->canvas.cells = new_cells;
-    app->canvas.colors = new_colors;
-    app->canvas.width = new_w;
-    app->canvas.height = new_h;
+    app->width = new_w;
+    app->height = new_h;
+    tart_undo_clear(app);
     return true;
 }
 
-bool tart_save_canvas(App *app, const char *path) {
+/* .tart format, plain text throughout:
+ *
+ *   <width> <height> [fps]
+ *   <height rows of glyphs>              frame 1, layer 1
+ *   COLOR                                optional per layer: <height> rows
+ *   <hex rows>                           of 2-hex-digit palette indices
+ *   LAYER                                next layer of the same frame
+ *   <rows...>
+ *   FRAME                                next frame (restarts at layer 1)
+ *   <rows...>
+ *
+ * A v1 file (no fps, no markers) is exactly one frame of one layer, and a
+ * one-frame one-layer save is a valid v1 file plus the fps field. */
+
+static void tart_skip_line(FILE *f) {
+    wint_t wc;
+    while ((wc = fgetwc(f)) != WEOF && wc != L'\n') {}
+}
+
+/* Reads c->height glyph rows starting at the current position (which must be
+ * the start of a row). Short rows stay blank-padded; overlong rows are
+ * clipped to c->width. */
+static void tart_read_rows(FILE *f, Canvas *c) {
+    for (int y = 0; y < c->height; y++) {
+        int x = 0;
+        wint_t wc;
+        while (x < c->width && (wc = fgetwc(f)) != WEOF && wc != L'\n') {
+            c->cells[y * c->width + x] = (wchar_t)wc;
+            x++;
+        }
+        if (x == c->width) tart_skip_line(f);
+    }
+}
+
+static bool tart_layer_has_color(Canvas *c) {
+    for (int i = 0; i < c->width * c->height; i++) {
+        if (c->colors[i] != 0) return true;
+    }
+    return false;
+}
+
+bool tart_save_doc(App *app, const char *path) {
     FILE *f = fopen(path, "w");
     if (!f) return false;
     fwide(f, 1);
-    fwprintf(f, L"%d %d\n", app->canvas.width, app->canvas.height);
-    for (int y = 0; y < app->canvas.height; y++) {
-        for (int x = 0; x < app->canvas.width; x++) {
-            fputwc(app->canvas.cells[y * app->canvas.width + x], f);
-        }
-        fputwc(L'\n', f);
-    }
+    fwprintf(f, L"%d %d %d\n", app->width, app->height, app->fps);
 
-    bool any_color = false;
-    for (int i = 0; i < app->canvas.width * app->canvas.height && !any_color; i++) {
-        if (app->canvas.colors[i] != 0) any_color = true;
-    }
-    if (any_color) {
-        fwprintf(f, L"COLOR\n");
-        for (int y = 0; y < app->canvas.height; y++) {
-            for (int x = 0; x < app->canvas.width; x++) {
-                fwprintf(f, L"%02x", app->canvas.colors[y * app->canvas.width + x]);
+    for (int fi = 0; fi < app->frame_count; fi++) {
+        for (int li = 0; li < app->layer_count; li++) {
+            if (fi > 0 && li == 0) fwprintf(f, L"FRAME\n");
+            if (li > 0) fwprintf(f, L"LAYER\n");
+            Canvas *c = &app->frames[fi].layers[li];
+            for (int y = 0; y < c->height; y++) {
+                for (int x = 0; x < c->width; x++) fputwc(c->cells[y * c->width + x], f);
+                fputwc(L'\n', f);
             }
-            fputwc(L'\n', f);
+            if (tart_layer_has_color(c)) {
+                fwprintf(f, L"COLOR\n");
+                for (int y = 0; y < c->height; y++) {
+                    for (int x = 0; x < c->width; x++) fwprintf(f, L"%02x", c->colors[y * c->width + x]);
+                    fputwc(L'\n', f);
+                }
+            }
         }
     }
 
@@ -1308,7 +1745,7 @@ bool tart_save_canvas(App *app, const char *path) {
     return true;
 }
 
-bool tart_load_canvas(App *app, const char *path) {
+bool tart_load_doc(App *app, const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return false;
     fwide(f, 1);
@@ -1319,49 +1756,82 @@ bool tart_load_canvas(App *app, const char *path) {
         fclose(f);
         return false;
     }
-    fgetwc(f); /* consume the newline after the header */
 
-    wchar_t *new_cells = malloc(sizeof(wchar_t) * (size_t)w * h);
-    if (!new_cells) { fclose(f); return false; }
-    wmemset(new_cells, L' ', (size_t)w * h);
-
-    unsigned char *new_colors = malloc((size_t)w * h);
-    if (!new_colors) { free(new_cells); fclose(f); return false; }
-    memset(new_colors, 0, (size_t)w * h);
-
-    for (int y = 0; y < h; y++) {
-        int x = 0;
+    /* Optional fps rides the header line; parse only up to the newline
+     * because %d would happily skip into the first glyph row. */
+    int fps = 8;
+    {
+        wchar_t rest[32];
+        int ri = 0;
         wint_t wc;
-        while (x < w && (wc = fgetwc(f)) != WEOF && wc != L'\n') {
-            new_cells[y * w + x] = (wchar_t)wc;
-            x++;
+        while ((wc = fgetwc(f)) != WEOF && wc != L'\n') {
+            if (ri < 31) rest[ri++] = (wchar_t)wc;
         }
-        if (x == w) {
-            wint_t rest;
-            while ((rest = fgetwc(f)) != WEOF && rest != L'\n') {}
-        }
+        rest[ri] = L'\0';
+        int v;
+        if (swscanf(rest, L"%d", &v) == 1 && v >= 1 && v <= 60) fps = v;
     }
 
-    /* Optional COLOR block: a marker line followed by w*h 2-hex-digit
-     * palette indices, row by row. Older files without it just render at
-     * default color (new_colors is already zeroed above). */
-    wchar_t marker[8] = {0};
-    if (fwscanf(f, L"%7ls", marker) == 1 && wcscmp(marker, L"COLOR") == 0) {
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
+    /* Stage the whole document before touching app, so a malformed or
+     * partially-read file can't destroy the open one. */
+    static Frame frames[MAX_FRAMES];
+    memset(frames, 0, sizeof(frames));
+    int cur_f = 0, cur_l = 0, max_layers = 1;
+    bool ok = init_canvas(&frames[0].layers[0], w, h);
+    if (ok) tart_read_rows(f, &frames[0].layers[0]);
+
+    wchar_t marker[8];
+    while (ok && fwscanf(f, L"%7ls", marker) == 1) {
+        if (wcscmp(marker, L"COLOR") == 0) {
+            Canvas *c = &frames[cur_f].layers[cur_l];
+            for (int i = 0; i < w * h; i++) {
                 unsigned int val = 0;
-                if (fwscanf(f, L"%2x", &val) == 1) new_colors[y * w + x] = (unsigned char)val;
+                if (fwscanf(f, L"%2x", &val) == 1) c->colors[i] = (unsigned char)val;
             }
+        } else if (wcscmp(marker, L"LAYER") == 0 && cur_l + 1 < MAX_LAYERS) {
+            cur_l++;
+            if (cur_l + 1 > max_layers) max_layers = cur_l + 1;
+            ok = init_canvas(&frames[cur_f].layers[cur_l], w, h);
+            if (ok) { tart_skip_line(f); tart_read_rows(f, &frames[cur_f].layers[cur_l]); }
+        } else if (wcscmp(marker, L"FRAME") == 0 && cur_f + 1 < MAX_FRAMES) {
+            cur_f++;
+            cur_l = 0;
+            ok = init_canvas(&frames[cur_f].layers[0], w, h);
+            if (ok) { tart_skip_line(f); tart_read_rows(f, &frames[cur_f].layers[0]); }
+        } else {
+            break;  /* unknown marker or capacity hit: keep what we have */
         }
     }
     fclose(f);
 
-    free(app->canvas.cells);
-    free(app->canvas.colors);
-    app->canvas.cells = new_cells;
-    app->canvas.colors = new_colors;
-    app->canvas.width = w;
-    app->canvas.height = h;
+    /* The format allows ragged layer counts; pad every frame to the max so
+     * the uniform-layers invariant holds. */
+    int fcount = cur_f + 1;
+    for (int fi = 0; ok && fi < fcount; fi++)
+        for (int li = 0; ok && li < max_layers; li++)
+            if (!frames[fi].layers[li].cells)
+                ok = init_canvas(&frames[fi].layers[li], w, h);
+
+    if (!ok) {
+        for (int fi = 0; fi < MAX_FRAMES; fi++)
+            for (int li = 0; li < MAX_LAYERS; li++)
+                cleanup_canvas(&frames[fi].layers[li]);
+        return false;
+    }
+
+    for (int fi = 0; fi < app->frame_count; fi++)
+        for (int li = 0; li < app->layer_count; li++)
+            cleanup_canvas(&app->frames[fi].layers[li]);
+    memcpy(app->frames, frames, sizeof(frames));
+    app->frame_count = fcount;
+    app->layer_count = max_layers;
+    app->cur_frame = 0;
+    app->cur_layer = 0;
+    app->width = w;
+    app->height = h;
+    app->fps = fps;
+    app->playing = false;
+    tart_undo_clear(app);
     return true;
 }
 
@@ -1375,19 +1845,26 @@ void tart_draw_help_overlay(App *app) {
         "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
         "View    v toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
-        "Tools   p pencil   e eraser   r rect   s select   m move (underlined letter)",
+        "Tools   d draw   e eraser   r rect   s select   m move (underlined letter)",
         "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
         "        f rect fill toggle",
         "Select  drag to select (stays outlined); Move: drag to stamp a copy,",
         "        repeatable by default - c toggles cut mode (clears source, one-shot)",
         "Draw    left-click hold to use tool   space+move = alt draw/pan",
+        "Edit    u undo   U redo - one step per stroke/stamp; frame, layer,",
+        "        resize and load operations reset the history",
         "Color   [ ] cycle 8 quick colors   click Color row for full HSL picker",
-        "Image   Image menu > Resize Canvas (WxH)",
+        "Anim    n/N next/prev frame   a add blank   A duplicate   x delete",
+        "        Enter play/stop   o onion skin (ghost of previous frame)   :fps N",
+        "Layer   { } prev/next   Layer menu or :layer-add / :layer-del",
+        "        space is transparent - lower layers show through; edits hit the",
+        "        active layer only (see the anim bar / status readout)",
+        "Image   Image menu > Resize Canvas (WxH) - resizes every frame and layer",
         "File    File menu > Save/Load, or :save <name> / :load <name>",
-        "Menu    Alt+F/E/V/I/H or click to open, arrows/Left-Right, Enter, Esc closes",
+        "Menu    Alt+F/E/V/I/A/L/H or click to open, arrows to move, Enter, Esc closes",
         "Cmd     : or Ctrl+E, fuzzy-searches as you type, Up/Down or wheel to pick,",
-        "          Enter or click a row to run (quit, help, about, deselect,",
-        "          reset-view, toggle-pan, resize, save, load)",
+        "          Enter or click a row to run (save, load, resize, play, fps,",
+        "          frame-add/dup/del, layer-add/del, onion, deselect, quit, ...)",
         "",
         "Press any key to close",
     };
@@ -1428,11 +1905,12 @@ void tart_draw_about_overlay(App *app) {
     int nb = (int)(sizeof(banner) / sizeof(banner[0]));
 
     const char *lines[] = {
-        "Terminal ASCII (Art) Rendering Tool",
+        "Terminal ASCII (Art) Rendering Tool  v" TART_VERSION,
         "",
-        "A small, suckless-flavored TUI pixel/ASCII-art editor:",
-        "pencil/eraser/rect/select/move tools, a 256-color canvas,",
-        "resizable images, plain-text .tart save/load.",
+        "A small, suckless-flavored TUI ASCII-art and animation editor:",
+        "draw/eraser/rect/select/move tools, a 256-color canvas,",
+        "stacked layers, animation frames with playback and onion skin,",
+        "undo/redo, resizable images, plain-text .tart save/load.",
         "",
         "Built with C99 + ncursesw. No dependencies beyond that.",
         "",
