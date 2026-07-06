@@ -42,13 +42,13 @@
 /* Visible canvas viewport size in screen cells. -1 on the width reserves the
  * column the right border renders on (without it, canvas.x + canvas.w lands
  * exactly on COLS, one past the last valid column, so that border would
- * silently never appear); -5 on the height reserves 3 header rows plus one
- * dedicated row each for the bottom border and the status/command bar below
- * it. Kept as macros since several places outside tart_compute_layout need
- * to agree with them exactly (view clamping, End-key centering, page-scroll
- * amounts, ...). */
+ * silently never appear); -6 on the height reserves 3 header rows plus one
+ * dedicated row each for the bottom border, the animation bar, and the
+ * status/command bar. Kept as macros since several places outside
+ * tart_compute_layout need to agree with them exactly (view clamping,
+ * End-key centering, page-scroll amounts, ...). */
 #define CANVAS_VIEW_W (COLS - CANVAS_START_X - 1)
-#define CANVAS_VIEW_H (LINES - 5)
+#define CANVAS_VIEW_H (LINES - 6)
 
 #define TART_RECT(x_, y_, w_, h_) ((TartRect){ .x = (x_), .y = (y_), .w = (w_), .h = (h_) })
 
@@ -71,25 +71,36 @@ static const TartCommand TART_COMMANDS[] = {
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
     { "resize", NULL, "Resize canvas (WxH)" },
-    { "save", NULL, "Save canvas to file" },
-    { "load", NULL, "Load canvas from file" },
+    { "save", NULL, "Save to file" },
+    { "load", NULL, "Load from file" },
+    { "play", NULL, "Play/stop animation" },
+    { "onion", NULL, "Toggle onion skin" },
+    { "fps", NULL, "Set playback FPS" },
+    { "frame-add", "fa", "Add blank frame" },
+    { "frame-dup", "fd", "Duplicate frame" },
+    { "frame-del", NULL, "Delete frame" },
+    { "layer-add", "la", "Add layer" },
+    { "layer-del", NULL, "Delete layer" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
-/* One top-level menu (File/Edit/View/Image/Help): a label plus the command
- * names (from TART_COMMANDS) shown in its dropdown, in order. */
+/* One top-level menu: a label plus the command names (from TART_COMMANDS)
+ * shown in its dropdown, in order. Every label's first letter doubles as
+ * its Alt+<letter> mnemonic, so they must stay unique. */
 typedef struct {
     const char *label;
-    const char *items[3];
+    const char *items[5];
     int item_count;
 } TartMenuDef;
 
 static const TartMenuDef TART_MENUS[] = {
-    { "File",  { "save", "load", "quit" },     3 },
-    { "Edit",  { "deselect" },                 1 },
-    { "View",  { "reset-view", "toggle-pan" }, 2 },
-    { "Image", { "resize" },                   1 },
-    { "Help",  { "help", "about" },             2 },
+    { "File",  { "save", "load", "quit" },              3 },
+    { "Edit",  { "deselect" },                          1 },
+    { "View",  { "reset-view", "toggle-pan", "onion" }, 3 },
+    { "Image", { "resize" },                            1 },
+    { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
+    { "Layer", { "layer-add", "layer-del" },            2 },
+    { "Help",  { "help", "about" },                     2 },
 };
 #define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
 
@@ -112,7 +123,26 @@ typedef enum {
     PROMPT_SAVE,
     PROMPT_LOAD,
     PROMPT_CUSTOM_CHAR,
+    PROMPT_FPS,
 } TartPromptMode;
+
+/* One region of the animation bar (the frame/layer/playback controls row
+ * between the canvas and the status bar); ANIM_NONE marks plain text. Same
+ * renderer/hit-test pairing idea as TartPanelRow. */
+typedef enum {
+    ANIM_NONE,
+    ANIM_FRAME_PREV, ANIM_FRAME_NEXT, ANIM_FRAME_ADD, ANIM_FRAME_DUP, ANIM_FRAME_DEL,
+    ANIM_LAYER_PREV, ANIM_LAYER_NEXT, ANIM_LAYER_ADD, ANIM_LAYER_DEL,
+    ANIM_PLAY, ANIM_ONION, ANIM_FPS,
+} TartAnimAction;
+
+typedef struct {
+    const char *label;
+    int x0, x1;
+    TartAnimAction action;
+} TartAnimItem;
+
+#define TART_ANIM_MAX_ITEMS 24
 
 /* What clicking a given tool-panel row does; see tart_apply_panel_action.
  * Shared between the panel's own click hit-test and identical keyboard
@@ -328,7 +358,9 @@ bool tart_layer_add(App *app);
 void tart_layer_del(App *app);
 void render(App *app);
 void handle_input(App *app);
-void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *status);
+void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *anim, TartRect *status);
+int tart_build_anim_bar(App *app, TartAnimItem items[TART_ANIM_MAX_ITEMS]);
+void tart_draw_anim_bar(App *app, TartRect anim_r);
 void tart_draw_at(App *app, int world_x, int world_y, wchar_t ch);
 void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, wchar_t ch, unsigned char color);
 bool tart_brush_outline(int dx, int dy, int size, BrushShape shape);
@@ -539,7 +571,7 @@ void cleanup_app(App *app) {
     endwin();
 }
 
-void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *status) {
+void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *anim, TartRect *status) {
     int lines = LINES;
     int cols = COLS;
     *menu    = TART_RECT(0, 0, cols, 1);
@@ -547,6 +579,7 @@ void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *to
     *tool    = TART_RECT(0, 3, TOOL_PANEL_WIDTH, CANVAS_VIEW_H);
     *y_ruler = TART_RECT(TOOL_PANEL_WIDTH, 3, Y_RULER_WIDTH, CANVAS_VIEW_H);
     *canvas  = TART_RECT(CANVAS_START_X, 3, CANVAS_VIEW_W, CANVAS_VIEW_H);
+    *anim    = TART_RECT(0, lines - 2, cols, 1);
     *status  = TART_RECT(0, lines - 1, cols, 1);
 }
 
@@ -681,8 +714,8 @@ void tart_draw_box(int x, int y, int w, int h) {
 void render(App *app) {
     erase();
 
-    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
-    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, anim_r, status_r;
+    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &anim_r, &status_r);
 
     attron(COLOR_PAIR(5));
     mvprintw(menu_r.y, menu_r.x, "%-*s", menu_r.w, "");
@@ -878,6 +911,8 @@ void render(App *app) {
         }
     }
 
+    tart_draw_anim_bar(app, anim_r);
+
     if (app->viewport.command_mode) {
         tart_draw_command_palette(app, status_r);
     } else if (app->viewport.prompt_mode != PROMPT_NONE) {
@@ -923,6 +958,17 @@ void render(App *app) {
         mvprintw(status_r.y, cx, "cursor[%4d,%4d]", app->viewport.vim_cursor_x, app->viewport.vim_cursor_y);
         attroff(COLOR_PAIR(5));
         cx += 18;
+
+        {
+            char fl[32];
+            int len = snprintf(fl, sizeof(fl), "frm %d/%d lyr %d/%d",
+                               app->cur_frame + 1, app->frame_count,
+                               app->cur_layer + 1, app->layer_count);
+            attron(COLOR_PAIR(5));
+            mvprintw(status_r.y, cx, "%s", fl);
+            attroff(COLOR_PAIR(5));
+            cx += len + 1;
+        }
 
         const char *hint = ": commands   ?/F1 help   q quit";
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
@@ -1148,6 +1194,62 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + TP_COLOR_SLIDER_DOT_X0 + (int)TART_BASIC_COLOR_COUNT, ']');
 }
 
+/* Appends one anim-bar item at *x with a two-space gap. disp_w is on-screen
+ * width, which differs from strlen for the UTF-8 │ separators. */
+static int tart_anim_append(TartAnimItem *items, int n, int *x, const char *label, int disp_w, TartAnimAction action) {
+    items[n] = (TartAnimItem){ label, *x, *x + disp_w - 1, action };
+    *x += disp_w + 2;
+    return n + 1;
+}
+
+int tart_build_anim_bar(App *app, TartAnimItem items[TART_ANIM_MAX_ITEMS]) {
+    static char frame_num[24], layer_num[24], fps_num[16];
+    snprintf(frame_num, sizeof(frame_num), "%d/%d", app->cur_frame + 1, app->frame_count);
+    snprintf(layer_num, sizeof(layer_num), "%d/%d", app->cur_layer + 1, app->layer_count);
+    snprintf(fps_num, sizeof(fps_num), "fps %d", app->fps);
+
+    int n = 0, x = 1;
+    n = tart_anim_append(items, n, &x, "frame", 5, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, frame_num, (int)strlen(frame_num), ANIM_NONE);
+    n = tart_anim_append(items, n, &x, "<", 1, ANIM_FRAME_PREV);
+    n = tart_anim_append(items, n, &x, ">", 1, ANIM_FRAME_NEXT);
+    n = tart_anim_append(items, n, &x, "+", 1, ANIM_FRAME_ADD);
+    n = tart_anim_append(items, n, &x, "dup", 3, ANIM_FRAME_DUP);
+    n = tart_anim_append(items, n, &x, "del", 3, ANIM_FRAME_DEL);
+    n = tart_anim_append(items, n, &x, "│", 1, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, "layer", 5, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, layer_num, (int)strlen(layer_num), ANIM_NONE);
+    n = tart_anim_append(items, n, &x, "{", 1, ANIM_LAYER_PREV);
+    n = tart_anim_append(items, n, &x, "}", 1, ANIM_LAYER_NEXT);
+    n = tart_anim_append(items, n, &x, "+", 1, ANIM_LAYER_ADD);
+    n = tart_anim_append(items, n, &x, "del", 3, ANIM_LAYER_DEL);
+    n = tart_anim_append(items, n, &x, "│", 1, ANIM_NONE);
+    n = tart_anim_append(items, n, &x, app->playing ? "stop" : "play", 4, ANIM_PLAY);
+    n = tart_anim_append(items, n, &x, app->onion ? "onion:on" : "onion:off", app->onion ? 8 : 9, ANIM_ONION);
+    n = tart_anim_append(items, n, &x, fps_num, (int)strlen(fps_num), ANIM_FPS);
+    return n;
+}
+
+void tart_draw_anim_bar(App *app, TartRect anim_r) {
+    TartAnimItem items[TART_ANIM_MAX_ITEMS];
+    int n = tart_build_anim_bar(app, items);
+
+    attron(COLOR_PAIR(5));
+    mvprintw(anim_r.y, anim_r.x, "%-*s", anim_r.w, "");
+    attroff(COLOR_PAIR(5));
+
+    for (int i = 0; i < n; i++) {
+        bool active = (items[i].action == ANIM_PLAY && app->playing) ||
+                      (items[i].action == ANIM_ONION && app->onion);
+        attr_t a = active ? (COLOR_PAIR(6) | A_BOLD)
+                 : (items[i].action == ANIM_NONE) ? COLOR_PAIR(5)
+                 : (COLOR_PAIR(5) | A_BOLD);
+        attron(a);
+        mvprintw(anim_r.y, items[i].x0, "%s", items[i].label);
+        attroff(a);
+    }
+}
+
 int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]) {
     (void)app;
     int x = 1;
@@ -1257,6 +1359,7 @@ static const char *tart_prompt_label(TartPromptMode mode) {
         case PROMPT_SAVE:        return "Save as:";
         case PROMPT_LOAD:        return "Load file:";
         case PROMPT_CUSTOM_CHAR: return "Custom char (hex codepoint):";
+        case PROMPT_FPS:         return "Playback FPS (1-60):";
         default:                 return "";
     }
 }

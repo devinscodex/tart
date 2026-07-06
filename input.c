@@ -161,6 +161,36 @@ static bool tart_parse_wh(const char *s, int *w, int *h) {
     return true;
 }
 
+static long tart_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* Single dispatch point for every animation-bar action, shared by its click
+ * hit-test, the equivalent keys (n/N a d D { } Enter o), the Anim/Layer
+ * menus, and the ':' commands. */
+static void tart_anim_action(App *app, TartAnimAction action) {
+    switch (action) {
+        case ANIM_FRAME_PREV: app->cur_frame = (app->cur_frame + app->frame_count - 1) % app->frame_count; break;
+        case ANIM_FRAME_NEXT: app->cur_frame = (app->cur_frame + 1) % app->frame_count; break;
+        case ANIM_FRAME_ADD:  tart_frame_add(app, false); break;
+        case ANIM_FRAME_DUP:  tart_frame_add(app, true); break;
+        case ANIM_FRAME_DEL:  tart_frame_del(app); break;
+        case ANIM_LAYER_PREV: app->cur_layer = (app->cur_layer + app->layer_count - 1) % app->layer_count; break;
+        case ANIM_LAYER_NEXT: app->cur_layer = (app->cur_layer + 1) % app->layer_count; break;
+        case ANIM_LAYER_ADD:  tart_layer_add(app); break;
+        case ANIM_LAYER_DEL:  tart_layer_del(app); break;
+        case ANIM_PLAY:
+            app->playing = !app->playing;
+            app->play_last_ms = tart_now_ms();
+            break;
+        case ANIM_ONION: app->onion = !app->onion; break;
+        case ANIM_FPS:   tart_open_prompt(app, PROMPT_FPS, ""); break;
+        default: break;
+    }
+}
+
 /* Single dispatch point for every named command, reached from the menu bar,
  * the ':' palette, and Alt+letter menu selection alike - arg is the text
  * after the command's first space (e.g. a filename or "WxHeight"), or NULL
@@ -196,6 +226,24 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         } else {
             tart_open_prompt(app, PROMPT_LOAD, "untitled.tart");
         }
+    } else if (strcmp(name, "play") == 0) {
+        tart_anim_action(app, ANIM_PLAY);
+    } else if (strcmp(name, "onion") == 0) {
+        tart_anim_action(app, ANIM_ONION);
+    } else if (strcmp(name, "fps") == 0) {
+        int v;
+        if (arg && sscanf(arg, "%d", &v) == 1 && v >= 1 && v <= 60) app->fps = v;
+        else tart_open_prompt(app, PROMPT_FPS, "");
+    } else if (strcmp(name, "frame-add") == 0) {
+        tart_anim_action(app, ANIM_FRAME_ADD);
+    } else if (strcmp(name, "frame-dup") == 0) {
+        tart_anim_action(app, ANIM_FRAME_DUP);
+    } else if (strcmp(name, "frame-del") == 0) {
+        tart_anim_action(app, ANIM_FRAME_DEL);
+    } else if (strcmp(name, "layer-add") == 0) {
+        tart_anim_action(app, ANIM_LAYER_ADD);
+    } else if (strcmp(name, "layer-del") == 0) {
+        tart_anim_action(app, ANIM_LAYER_DEL);
     }
 }
 
@@ -364,8 +412,8 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     if (vp->prompt_mode != PROMPT_NONE) return;
 
     if (vp->command_mode) {
-        TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
-        tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+        TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, anim_r, status_r;
+        tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &anim_r, &status_r);
 
         char verb[64];
         tart_command_verb(vp->command_buffer, verb, sizeof(verb));
@@ -496,10 +544,28 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         return;
     }
 
-    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
-    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, anim_r, status_r;
+    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &anim_r, &status_r);
 
     if (left_press && tart_handle_menu_click(app, sx, sy, menu_r)) {
+        vp->last_mouse_screen_x = sx;
+        vp->last_mouse_screen_y = sy;
+        return;
+    }
+
+    /* The anim/status rows sit below the canvas; consume events there so a
+     * click can never fall through and paint a scrolled-out-of-view cell. */
+    if (sy >= anim_r.y) {
+        if (left_press && sy == anim_r.y) {
+            TartAnimItem items[TART_ANIM_MAX_ITEMS];
+            int n = tart_build_anim_bar(app, items);
+            for (int i = 0; i < n; i++) {
+                if (items[i].action != ANIM_NONE && sx >= items[i].x0 && sx <= items[i].x1) {
+                    tart_anim_action(app, items[i].action);
+                    break;
+                }
+            }
+        }
         vp->last_mouse_screen_x = sx;
         vp->last_mouse_screen_y = sy;
         return;
@@ -558,6 +624,16 @@ static void tart_apply_mouse(App *app, int sx, int sy,
 }
 
 void handle_input(App *app) {
+    /* Playback advances on wall time, checked once per loop; getch's 50ms
+     * timeout caps the effective playback rate at ~20fps. */
+    if (app->playing && app->frame_count > 1) {
+        long now = tart_now_ms();
+        if (now - app->play_last_ms >= 1000 / app->fps) {
+            app->cur_frame = (app->cur_frame + 1) % app->frame_count;
+            app->play_last_ms = now;
+        }
+    }
+
     int ch = getch();
     if (ch == ERR) {
         return;
@@ -751,6 +827,11 @@ void handle_input(App *app) {
                     if (code > 0) vp->brush_char = code;
                     break;
                 }
+                case PROMPT_FPS: {
+                    int v = atoi(vp->prompt_buffer);
+                    if (v >= 1 && v <= 60) app->fps = v;
+                    break;
+                }
                 default:
                     break;
             }
@@ -936,6 +1017,33 @@ void handle_input(App *app) {
     }
     if (ch == 'v' || ch == 'V') {
         tart_toggle_pan(app);
+    }
+    if (ch == 'n') {
+        tart_anim_action(app, ANIM_FRAME_NEXT);
+    }
+    if (ch == 'N') {
+        tart_anim_action(app, ANIM_FRAME_PREV);
+    }
+    if (ch == 'a') {
+        tart_anim_action(app, ANIM_FRAME_ADD);
+    }
+    if (ch == 'd') {
+        tart_anim_action(app, ANIM_FRAME_DUP);
+    }
+    if (ch == 'D') {
+        tart_anim_action(app, ANIM_FRAME_DEL);
+    }
+    if (ch == '{') {
+        tart_anim_action(app, ANIM_LAYER_PREV);
+    }
+    if (ch == '}') {
+        tart_anim_action(app, ANIM_LAYER_NEXT);
+    }
+    if (ch == 'o') {
+        tart_anim_action(app, ANIM_ONION);
+    }
+    if (ch == '\n' || ch == KEY_ENTER) {
+        tart_anim_action(app, ANIM_PLAY);
     }
     if (ch == 'h') {
         app->viewport.vim_cursor_x--;
