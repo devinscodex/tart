@@ -51,6 +51,44 @@ move) applies to the active layer of the active frame only; duplicating a
 frame (`d`) copies all its layers, which is how a static background carries
 across an animation.
 
+## Animation guide
+
+Two worked examples live in `examples/`:
+
+- **`walk.tart`** — a stick figure's 4-key-frame walk cycle over a ground
+  layer, no color. Open it in a text editor first: you can see each frame's
+  pose directly in the file. The four keys are the classic pair of poses,
+  twice: **contact** (full stride, arms open `/|\`), **passing** (upright on
+  one leg, rear foot trailing), contact again with the arm swing reversed
+  (`\|/`), passing with the front foot reaching. Any walk reads as a walk
+  with just these four.
+- **`campfire.tart`** — 4 flame flicker frames over a static scene, with a
+  `COLOR` block on the flame layer only (yellow tips → orange → red base).
+
+The keyframe workflow, using the walk as the model:
+
+1. Draw the background on layer 1 (ground, scenery). `:layer-add`, then draw
+   the character's first pose on layer 2.
+2. `d` duplicates the current frame — all layers copied — so the background
+   carries forward and the pose is your starting point for the next key.
+3. Nudge the copy into the next pose. Select+move only touches the active
+   layer, so you can drag a limb without carving a hole in the background.
+4. `o` turns on onion skin: the previous frame ghosts through in dim
+   wherever the current frame is blank. Step with `n`/`N` and check the
+   spacing between poses — big jumps read as fast motion, small ones slow.
+5. `Enter` to play, `:fps N` to tune the speed (a 4-frame walk sits well at
+   6–10 fps), `Enter` again to stop.
+
+Tips for game assets:
+
+- Animate **in place** (like `walk.tart`) — the game engine moves the
+  sprite; the cycle just has to loop.
+- Keep the character and scene on separate layers even for single frames:
+  the game can composite them independently later, and you can re-dress the
+  same walk over any background.
+- Frames are cheap to reorder by hand in the file — each is just a block of
+  rows after a `FRAME` line.
+
 ## File format (`.tart`)
 
 One plain-text file per document, frames delimited by marker lines:
