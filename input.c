@@ -1,9 +1,137 @@
 #include "tart.h"
 
+static void tart_apply_mouse(App *app, int sx, int sy,
+                              bool left_press, bool left_release,
+                              bool mid_press, bool mid_release,
+                              bool right_press, bool right_release,
+                              bool wheel_up, bool wheel_down,
+                              bool shift, bool ctrl, bool alt) {
+    Viewport *vp = &app->viewport;
+    vp->mod_shift = shift;
+    vp->mod_ctrl = ctrl;
+    vp->mod_alt = alt;
+
+    if (left_press)    vp->left_click_held = true;
+    if (left_release)  vp->left_click_held = false;
+    if (mid_press)      vp->mid_click_held = true;
+    if (mid_release)    vp->mid_click_held = false;
+    if (right_press)    vp->right_click_held = true;
+    if (right_release)  vp->right_click_held = false;
+
+    if (wheel_up || wheel_down) {
+        int delta = wheel_up ? -4 : 4;
+        if (shift) vp->offset_x += delta;
+        else vp->offset_y += delta;
+        return;
+    }
+
+    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
+    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+
+    int wx = (sx >= canvas_r.x) ? (sx - canvas_r.x) + vp->offset_x : -9999;
+    int wy = (sy >= canvas_r.y) ? (sy - canvas_r.y) + vp->offset_y : -9999;
+    vp->mouse_world_x = wx;
+    vp->mouse_world_y = wy;
+    vp->current_mouse_world_x = wx;
+    vp->current_mouse_world_y = wy;
+    vp->vim_cursor_x = wx;
+    vp->vim_cursor_y = wy;
+    vp->cursor_doc_x = wx;
+    vp->cursor_doc_y = wy;
+
+    if (left_press && sx >= tool_r.x && sx < tool_r.x + tool_r.w && sy >= tool_r.y && sy < tool_r.y + tool_r.h) {
+        if (sy == tool_r.y + 3) vp->current_brush = '#';
+        else if (sy == tool_r.y + 4) vp->current_brush = ' ';
+    }
+
+    bool first_event = (vp->last_mouse_screen_x == 0 && vp->last_mouse_screen_y == 0);
+    bool acting = vp->left_click_held || vp->space_held;
+
+    if (acting && !vp->is_dragging) {
+        if (wx >= 0 && wy >= 0) tart_draw_at(app, wx, wy, vp->current_brush);
+    } else if ((acting || vp->is_dragging) && !first_event) {
+        vp->offset_x -= (sx - vp->last_mouse_screen_x);
+        vp->offset_y -= (sy - vp->last_mouse_screen_y);
+    }
+
+    vp->last_mouse_screen_x = sx;
+    vp->last_mouse_screen_y = sy;
+}
+
 void handle_input(App *app) {
     int ch = getch();
     if (ch == ERR) {
         return;
+    }
+
+    bool have_sgr_mouse = false;
+    int sgr_sx = 0, sgr_sy = 0;
+    bool sgr_left_press = false, sgr_left_release = false;
+    bool sgr_mid_press = false, sgr_mid_release = false;
+    bool sgr_right_press = false, sgr_right_release = false;
+    bool sgr_wheel_up = false, sgr_wheel_down = false;
+    bool sgr_shift = false, sgr_ctrl = false, sgr_alt = false;
+
+    if (ch == 27) {
+        /* ncurses' terminfo kmous is the legacy "\E[M" prefix, so it never
+         * recognizes xterm SGR mouse reports ("\E[<...M/m"). Terminals that
+         * support SGR (nearly all modern ones) still emit them once we
+         * request mode 1006, so we parse those bytes by hand here. A real
+         * standalone Escape keypress has nothing following it, so a
+         * zero-delay peek reliably tells the two apart. */
+        timeout(0);
+        int c1 = getch();
+        if (c1 == '[') {
+            int c2 = getch();
+            if (c2 == '<') {
+                int fields[3] = {0, 0, 0};
+                int fidx = 0;
+                int c;
+                bool terminated = false;
+                bool released = false;
+                while ((c = getch()) != ERR) {
+                    if (c >= '0' && c <= '9') {
+                        fields[fidx] = fields[fidx] * 10 + (c - '0');
+                    } else if (c == ';' && fidx < 2) {
+                        fidx++;
+                    } else if (c == 'M' || c == 'm') {
+                        released = (c == 'm');
+                        terminated = true;
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                if (terminated) {
+                    int cb = fields[0];
+                    sgr_sx = fields[1] - 1;
+                    sgr_sy = fields[2] - 1;
+                    sgr_shift = (cb & 4) != 0;
+                    sgr_alt   = (cb & 8) != 0;
+                    sgr_ctrl  = (cb & 16) != 0;
+                    if (cb & 64) {
+                        sgr_wheel_up = ((cb & 1) == 0);
+                        sgr_wheel_down = !sgr_wheel_up;
+                    } else {
+                        int btn = cb & 3;
+                        sgr_left_press    = (!released && btn == 0);
+                        sgr_left_release  = (released && btn == 0);
+                        sgr_mid_press     = (!released && btn == 1);
+                        sgr_mid_release   = (released && btn == 1);
+                        sgr_right_press   = (!released && btn == 2);
+                        sgr_right_release = (released && btn == 2);
+                    }
+                    have_sgr_mouse = true;
+                    ch = KEY_MOUSE;
+                }
+            } else {
+                if (c2 != ERR) ungetch(c2);
+                ungetch('[');
+            }
+        } else {
+            if (c1 != ERR) ungetch(c1);
+        }
+        timeout(50);
     }
 
     if (app->viewport.help_visible) {
@@ -213,109 +341,22 @@ void handle_input(App *app) {
         app->viewport.offset_y += 3;
     }
     if (ch == KEY_MOUSE) {
-        MEVENT event;
-        if (getmouse(&event) == OK) {
-            int sx = event.x;
-            int sy = event.y;
-
-            if (!(event.bstate & (BUTTON4_PRESSED | BUTTON5_PRESSED))) {
-                int wx = (sx >= CANVAS_START_X) ? (sx - CANVAS_START_X) + app->viewport.offset_x : -9999;
-                int wy = (sy >= 3) ? (sy - 3) + app->viewport.offset_y : -9999;
-                app->viewport.mouse_world_x = wx;
-                app->viewport.mouse_world_y = wy;
-                app->viewport.current_mouse_world_x = wx;
-                app->viewport.current_mouse_world_y = wy;
-                app->viewport.vim_cursor_x = wx;
-                app->viewport.vim_cursor_y = wy;
-                app->viewport.cursor_doc_x = wx;
-                app->viewport.cursor_doc_y = wy;
-
-                if (app->viewport.last_mouse_screen_x == 0 && app->viewport.last_mouse_screen_y == 0) {
-                    app->viewport.last_mouse_screen_x = sx;
-                    app->viewport.last_mouse_screen_y = sy;
-                }
-            }
-
-            if (event.bstate & BUTTON1_PRESSED) {
-                app->viewport.left_click_held = true;
-                if (app->viewport.is_dragging) {
-                    app->viewport.last_mouse_screen_x = sx;
-                    app->viewport.last_mouse_screen_y = sy;
-                }
-            }
-            if (event.bstate & BUTTON1_RELEASED) {
-                app->viewport.left_click_held = false;
-            }
-
-            if (event.bstate & REPORT_MOUSE_POSITION) {
-                if (app->viewport.left_click_held) {
-                    int world_x = (sx >= CANVAS_START_X) ? (sx - CANVAS_START_X) + app->viewport.offset_x : -9999;
-                    int world_y = (sy >= 3) ? (sy - 3) + app->viewport.offset_y : -9999;
-                    if (!app->viewport.is_dragging) {
-                        if (world_x >= 0 && world_y >= 0) {
-                            tart_draw_at(app, world_x, world_y, app->viewport.current_brush);
-                        }
-                    } else {
-                        if (app->viewport.last_mouse_screen_x != 0 || app->viewport.last_mouse_screen_y != 0) {
-                            int dx = sx - app->viewport.last_mouse_screen_x;
-                            int dy = sy - app->viewport.last_mouse_screen_y;
-                            app->viewport.offset_x -= dx;
-                            app->viewport.offset_y -= dy;
-                        }
-                        app->viewport.last_mouse_screen_x = sx;
-                        app->viewport.last_mouse_screen_y = sy;
-                    }
-                } else if (app->viewport.space_held) {
-                    int world_x = (sx >= CANVAS_START_X) ? (sx - CANVAS_START_X) + app->viewport.offset_x : -9999;
-                    int world_y = (sy >= 3) ? (sy - 3) + app->viewport.offset_y : -9999;
-                    if (!app->viewport.is_dragging) {
-                        if (world_x >= 0 && world_y >= 0) {
-                            tart_draw_at(app, world_x, world_y, app->viewport.current_brush);
-                        }
-                    } else {
-                        if (app->viewport.last_mouse_screen_x != 0 || app->viewport.last_mouse_screen_y != 0) {
-                            int dx = sx - app->viewport.last_mouse_screen_x;
-                            int dy = sy - app->viewport.last_mouse_screen_y;
-                            app->viewport.offset_x -= dx;
-                            app->viewport.offset_y -= dy;
-                        }
-                        app->viewport.last_mouse_screen_x = sx;
-                        app->viewport.last_mouse_screen_y = sy;
-                    }
-                } else if (app->viewport.is_dragging) {
-                    if (app->viewport.last_mouse_screen_x != 0 || app->viewport.last_mouse_screen_y != 0) {
-                        int dx = sx - app->viewport.last_mouse_screen_x;
-                        int dy = sy - app->viewport.last_mouse_screen_y;
-                        app->viewport.offset_x -= dx;
-                        app->viewport.offset_y -= dy;
-                    }
-                    app->viewport.last_mouse_screen_x = sx;
-                    app->viewport.last_mouse_screen_y = sy;
-                }
-            }
-
-            if (event.bstate & BUTTON4_PRESSED || event.bstate & BUTTON5_PRESSED) {
-                int delta = (event.bstate & BUTTON4_PRESSED) ? -4 : 4;
-                if (event.bstate & BUTTON_SHIFT) {
-                    app->viewport.offset_x += delta;
-                } else {
-                    app->viewport.offset_y += delta;
-                }
-            }
-
-            if (sx < CANVAS_START_X && sy >= 3 && sy < LINES - 1) {
-                if (sy == 6) app->viewport.current_brush = '#';
-                else if (sy == 7) app->viewport.current_brush = ' ';
-            }
-
-            if (sx >= CANVAS_START_X && sy >= 3 && sy < LINES - 1 && !app->viewport.space_held && !app->viewport.left_click_held) {
-                int world_x = (sx - CANVAS_START_X) + app->viewport.offset_x;
-                int world_y = (sy - 3) + app->viewport.offset_y;
-                if (event.bstate & (BUTTON1_PRESSED | REPORT_MOUSE_POSITION)) {
-                    if (!app->viewport.is_dragging) {
-                        tart_draw_at(app, world_x, world_y, app->viewport.current_brush);
-                    }
-                }
+        if (have_sgr_mouse) {
+            tart_apply_mouse(app, sgr_sx, sgr_sy,
+                sgr_left_press, sgr_left_release,
+                sgr_mid_press, sgr_mid_release,
+                sgr_right_press, sgr_right_release,
+                sgr_wheel_up, sgr_wheel_down,
+                sgr_shift, sgr_ctrl, sgr_alt);
+        } else {
+            MEVENT event;
+            if (getmouse(&event) == OK) {
+                tart_apply_mouse(app, event.x, event.y,
+                    (event.bstate & BUTTON1_PRESSED) != 0, (event.bstate & BUTTON1_RELEASED) != 0,
+                    (event.bstate & BUTTON2_PRESSED) != 0, (event.bstate & BUTTON2_RELEASED) != 0,
+                    (event.bstate & BUTTON3_PRESSED) != 0, (event.bstate & BUTTON3_RELEASED) != 0,
+                    (event.bstate & BUTTON4_PRESSED) != 0, (event.bstate & BUTTON5_PRESSED) != 0,
+                    (event.bstate & BUTTON_SHIFT) != 0, (event.bstate & BUTTON_CTRL) != 0, (event.bstate & BUTTON_ALT) != 0);
             }
         }
     }

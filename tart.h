@@ -63,6 +63,11 @@ typedef struct {
     char mode;
     bool space_held;
     bool left_click_held;
+    bool mid_click_held;
+    bool right_click_held;
+    bool mod_shift;
+    bool mod_ctrl;
+    bool mod_alt;
     bool help_visible;
 } Viewport;
 
@@ -113,7 +118,8 @@ void init_app(App *app) {
     nodelay(stdscr, TRUE);
     timeout(50);
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-    printf("\033[?1003h");   // enable full active mouse motion tracking
+    printf("\033[?1003h\033[?1006h");   // any-motion tracking (1003) + SGR extended encoding (1006)
+    fflush(stdout);
     mouseinterval(0);
     start_color();
     init_pair(1, COLOR_CYAN, COLOR_BLACK);
@@ -143,12 +149,17 @@ void init_app(App *app) {
     app->viewport.mode = 'n';
     app->viewport.space_held = false;
     app->viewport.left_click_held = false;
+    app->viewport.mid_click_held = false;
+    app->viewport.right_click_held = false;
+    app->viewport.mod_shift = false;
+    app->viewport.mod_ctrl = false;
+    app->viewport.mod_alt = false;
     app->viewport.help_visible = false;
     app->running = 1;
 }
 
 void cleanup_app(App *app) {
-    printf("\033[?1003l");   // disable mouse tracking mode
+    printf("\033[?1006l\033[?1003l");   // disable SGR encoding + any-motion tracking
     fflush(stdout);
     cleanup_canvas(&app->canvas);
     endwin();
@@ -259,24 +270,69 @@ void render(App *app) {
         tart_draw_command_palette(app, status_r);
     } else {
         const char *mode_badge = (app->viewport.mode == 'n') ? " NORMAL " : " PAN ";
+        int cx = status_r.x;
 
         mvprintw(status_r.y, status_r.x, "%*s", status_r.w, "");
+
         attron(COLOR_PAIR(3) | A_BOLD);
-        mvprintw(status_r.y, status_r.x, "%s", mode_badge);
+        mvprintw(status_r.y, cx, "%s", mode_badge);
         attroff(COLOR_PAIR(3) | A_BOLD);
+        cx += (int)strlen(mode_badge) + 1;
 
         attron(COLOR_PAIR(2));
-        mvprintw(status_r.y, status_r.x + (int)strlen(mode_badge) + 1, "brush '%c'", app->viewport.current_brush);
+        mvprintw(status_r.y, cx, "brush '%c'", app->viewport.current_brush);
         attroff(COLOR_PAIR(2));
+        cx += (int)strlen("brush 'X'") + 1;
 
         attron(COLOR_PAIR(4) | A_DIM);
-        mvprintw(status_r.y, status_r.x + (int)strlen(mode_badge) + 20,
-            "[%d,%d]", app->viewport.vim_cursor_x, app->viewport.vim_cursor_y);
+        mvprintw(status_r.y, cx, "mouse[%4d,%4d]", app->viewport.mouse_world_x, app->viewport.mouse_world_y);
         attroff(COLOR_PAIR(4) | A_DIM);
+        cx += 17;
+
+        attron(COLOR_PAIR(4) | A_DIM);
+        mvprintw(status_r.y, cx, "cursor[%4d,%4d]", app->viewport.vim_cursor_x, app->viewport.vim_cursor_y);
+        attroff(COLOR_PAIR(4) | A_DIM);
+        cx += 18;
+
+        {
+            bool L = app->viewport.left_click_held;
+            bool M = app->viewport.mid_click_held;
+            bool R = app->viewport.right_click_held;
+            mvprintw(status_r.y, cx, "btn[");
+            attron(L ? (COLOR_PAIR(2) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 4, "%c", L ? 'L' : 'l');
+            attroff(L ? (COLOR_PAIR(2) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            attron(M ? (COLOR_PAIR(2) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 5, "%c", M ? 'M' : 'm');
+            attroff(M ? (COLOR_PAIR(2) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            attron(R ? (COLOR_PAIR(2) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 6, "%c", R ? 'R' : 'r');
+            attroff(R ? (COLOR_PAIR(2) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 7, "]");
+            cx += 9;
+        }
+
+        {
+            bool S = app->viewport.mod_shift;
+            bool C = app->viewport.mod_ctrl;
+            bool A = app->viewport.mod_alt;
+            mvprintw(status_r.y, cx, "mod[");
+            attron(S ? (COLOR_PAIR(1) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 4, "%c", S ? 'S' : 's');
+            attroff(S ? (COLOR_PAIR(1) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            attron(C ? (COLOR_PAIR(1) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 5, "%c", C ? 'C' : 'c');
+            attroff(C ? (COLOR_PAIR(1) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            attron(A ? (COLOR_PAIR(1) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 6, "%c", A ? 'A' : 'a');
+            attroff(A ? (COLOR_PAIR(1) | A_BOLD) : (COLOR_PAIR(4) | A_DIM));
+            mvprintw(status_r.y, cx + 7, "]");
+            cx += 9;
+        }
 
         const char *hint = ": commands   ?/F1 help   q quit";
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
-        if (hint_x > status_r.x) {
+        if (hint_x > cx) {
             attron(COLOR_PAIR(4) | A_DIM);
             mvprintw(status_r.y, hint_x, "%s", hint);
             attroff(COLOR_PAIR(4) | A_DIM);
