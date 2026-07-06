@@ -32,11 +32,15 @@
 #define Y_RULER_WIDTH 5
 #define CANVAS_START_X (TOOL_PANEL_WIDTH + Y_RULER_WIDTH)
 /* Visible canvas viewport size in screen cells. -1 on the width reserves the
- * column the right border/scrollbar renders on; kept as one macro since
- * several places outside tart_compute_layout need to agree with it exactly
- * (view clamping, End-key centering, ...). */
+ * column the right border renders on (without it, canvas.x + canvas.w lands
+ * exactly on COLS, one past the last valid column, so that border would
+ * silently never appear); -5 on the height reserves 3 header rows plus one
+ * dedicated row each for the bottom border and the status/command bar below
+ * it. Kept as macros since several places outside tart_compute_layout need
+ * to agree with them exactly (view clamping, End-key centering, page-scroll
+ * amounts, ...). */
 #define CANVAS_VIEW_W (COLS - CANVAS_START_X - 1)
-#define CANVAS_VIEW_H (LINES - 4)
+#define CANVAS_VIEW_H (LINES - 5)
 
 #define TART_RECT(x_, y_, w_, h_) ((TartRect){ .x = (x_), .y = (y_), .w = (w_), .h = (h_) })
 
@@ -54,6 +58,7 @@ typedef struct {
 static const TartCommand TART_COMMANDS[] = {
     { "quit", "q",     "Quit TART" },
     { "help", "binds", "Show keybindings" },
+    { "about", NULL,   "About TART" },
     { "deselect", NULL, "Clear current selection" },
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
@@ -76,7 +81,7 @@ static const TartMenuDef TART_MENUS[] = {
     { "Edit",  { "deselect" },                 1 },
     { "View",  { "reset-view", "toggle-pan" }, 2 },
     { "Image", { "resize" },                   1 },
-    { "Help",  { "help" },                     1 },
+    { "Help",  { "help", "about" },             2 },
 };
 #define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
 
@@ -110,10 +115,13 @@ typedef enum {
     PANEL_CHAR_OPEN,
     PANEL_SIZE_DEC,
     PANEL_SIZE_INC,
+    PANEL_SIZE_SET,      /* value = index into TART_BRUSH_SIZES */
     PANEL_SHAPE_TOGGLE,
     PANEL_RECT_FILL_TOGGLE,
     PANEL_FILL_CHAR_OPEN,
+    PANEL_MOVE_CUT_TOGGLE,
     PANEL_COLOR_OPEN,
+    PANEL_COLOR_SET,     /* value = index into TART_BASIC_COLORS */
 } TartPanelAction;
 
 /* Which brush the char palette popup is picking a glyph for: the pencil's
@@ -141,12 +149,18 @@ static const TartPaletteCategory TART_PALETTE[] = {
 #define PALETTE_LABEL_WIDTH 20
 #define PALETTE_CHAR_CELL_W 2
 
-/* Quick-access basic colors for the '-'/'=' cycle keys, so common colors
+/* Quick-access basic colors for the '['/']' cycle keys, so common colors
  * don't require opening the full HSL picker. Values are xterm-256 indices;
  * plain black (0) is skipped because Canvas.colors uses 0 as its own
  * "no color" sentinel, so cube-black (16) stands in for it instead. */
 static const unsigned char TART_BASIC_COLORS[] = { 15, 9, 10, 11, 12, 13, 14, 16 };
 #define TART_BASIC_COLOR_COUNT (sizeof(TART_BASIC_COLORS) / sizeof(TART_BASIC_COLORS[0]))
+
+/* Discrete brush/eraser sizes for the '-'/'=' cycle keys and the size
+ * slider; shared with tart_cycle_size in input.c so panel and keyboard
+ * agree on the same stops. */
+static const int TART_BRUSH_SIZES[] = { 1, 3, 5, 7, 9, 13, 17, 21 };
+#define TART_BRUSH_SIZE_COUNT (sizeof(TART_BRUSH_SIZES) / sizeof(TART_BRUSH_SIZES[0]))
 
 typedef struct {
     int row;            /* y offset from tool_r.y */
@@ -155,7 +169,7 @@ typedef struct {
     int value;          /* payload, e.g. TartTool for PANEL_SELECT_TOOL */
 } TartPanelRow;
 
-#define TOOL_PANEL_MAX_ROWS 16
+#define TOOL_PANEL_MAX_ROWS 32
 
 /* Row layout shared by the tool-panel renderer and its click hit-test, so
  * they can never drift out of sync with each other. */
@@ -169,9 +183,12 @@ typedef struct {
 #define TP_ROW_OPT1           10
 #define TP_ROW_OPT2           11
 #define TP_ROW_OPT3           12
-#define TP_ROW_COLOR          14
+#define TP_ROW_SIZE_SLIDER    13    /* pencil/eraser only: "-[dots]= NN" */
+#define TP_ROW_COLOR          14    /* "Color [dots]" - dots double as quick-jump targets */
 #define TP_SIZE_DEC_X         9
 #define TP_SIZE_INC_X         12
+#define TP_SIZE_SLIDER_DOT_X0 3     /* first size-slider dot's column offset from tool_r.x */
+#define TP_COLOR_SLIDER_DOT_X0 8    /* first color-slider dot's column offset from tool_r.x */
 
 #define PAN_VOID_MARGIN 10
 
@@ -215,13 +232,15 @@ typedef struct {
     int drag_cur_wx, drag_cur_wy;
     bool has_selection;
     int sel_w, sel_h;
+    int sel_origin_wx, sel_origin_wy;  /* top-left of the selected region, for its persistent highlight */
     wchar_t *sel_buffer;
     unsigned char *sel_colors;
+    bool move_cut;  /* false = stamp (keep source, repeatable); true = cut (clears source, one-shot) */
 
-    /* Color: current_color paints; the HSL picker and the '-'/'=' quick
+    /* Color: current_color paints; the HSL picker and the '['/']' quick
      * palette are two different ways of setting it. */
     unsigned char current_color;
-    int quick_color_idx;        /* position in TART_BASIC_COLORS for -/= cycling */
+    int quick_color_idx;        /* position in TART_BASIC_COLORS for [/] cycling */
     bool color_picker_visible;
     int hsl_h, hsl_s, hsl_l;
     int color_slider_focus;
@@ -255,9 +274,8 @@ typedef struct {
     bool space_held;
     bool left_click_held;   /* drives "is a draw/pan gesture active" */
     bool mod_shift;         /* shift+wheel = horizontal scroll */
-    bool scrollbar_drag_v;
-    bool scrollbar_drag_h;
     bool help_visible;
+    bool about_visible;
 } Viewport;
 
 typedef struct {
@@ -282,6 +300,8 @@ void handle_input(App *app);
 void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *status);
 void tart_draw_at(App *app, int world_x, int world_y, wchar_t ch);
 void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, wchar_t ch, unsigned char color);
+bool tart_brush_outline(int dx, int dy, int size, BrushShape shape);
+bool tart_rect_outline(int x, int y, int rx, int ry, int rect_w, int rect_h);
 wchar_t tart_read_cell(App *app, int x, int y);
 void tart_set_color(App *app, int x, int y, unsigned char color);
 unsigned char tart_read_color(App *app, int x, int y);
@@ -295,6 +315,7 @@ void tart_draw_tool_panel(App *app, TartRect tool_r);
 void tart_draw_menu_dropdown(App *app, TartRect menu_r);
 void tart_draw_command_palette(App *app, TartRect status);
 void tart_draw_help_overlay(App *app);
+void tart_draw_about_overlay(App *app);
 void tart_draw_prompt(App *app, TartRect status_r);
 void tart_compute_palette_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_max_chars);
 void tart_draw_palette(App *app);
@@ -304,9 +325,6 @@ bool tart_load_canvas(App *app, const char *path);
 void tart_draw_box(int x, int y, int w, int h);
 int tart_command_matches(const char *query, int match_idx[TART_COMMAND_COUNT]);
 void tart_command_verb(const char *buf, char *out, size_t out_sz);
-void tart_scrollbar_thumb(int content, int visible, int pos, int track_len, int *out_start, int *out_len);
-void tart_scrollbar_seek(int content, int visible, int track_pos, int track_len, int *out_pos);
-void tart_draw_scrollbars(App *app, TartRect canvas_r);
 
 #endif
 
@@ -385,8 +403,11 @@ void init_app(App *app) {
     app->viewport.has_selection = false;
     app->viewport.sel_w = 0;
     app->viewport.sel_h = 0;
+    app->viewport.sel_origin_wx = 0;
+    app->viewport.sel_origin_wy = 0;
     app->viewport.sel_buffer = NULL;
     app->viewport.sel_colors = NULL;
+    app->viewport.move_cut = false;
     app->viewport.current_color = 0;
     app->viewport.quick_color_idx = 0;
     app->viewport.color_picker_visible = false;
@@ -414,9 +435,8 @@ void init_app(App *app) {
     app->viewport.space_held = false;
     app->viewport.left_click_held = false;
     app->viewport.mod_shift = false;
-    app->viewport.scrollbar_drag_v = false;
-    app->viewport.scrollbar_drag_h = false;
     app->viewport.help_visible = false;
+    app->viewport.about_visible = false;
     app->running = 1;
 }
 
@@ -436,10 +456,10 @@ void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *to
     int cols = COLS;
     *menu    = TART_RECT(0, 0, cols, 1);
     *ruler   = TART_RECT(0, 1, cols, 2);
-    *tool    = TART_RECT(0, 3, TOOL_PANEL_WIDTH, lines - 4);
-    *y_ruler = TART_RECT(TOOL_PANEL_WIDTH, 3, Y_RULER_WIDTH, lines - 4);
+    *tool    = TART_RECT(0, 3, TOOL_PANEL_WIDTH, CANVAS_VIEW_H);
+    *y_ruler = TART_RECT(TOOL_PANEL_WIDTH, 3, Y_RULER_WIDTH, CANVAS_VIEW_H);
     *canvas  = TART_RECT(CANVAS_START_X, 3, CANVAS_VIEW_W, CANVAS_VIEW_H);
-    *status  = TART_RECT(0, lines - 2, cols, 1);
+    *status  = TART_RECT(0, lines - 1, cols, 1);
 }
 
 void tart_draw_at(App *app, int world_x, int world_y, wchar_t ch) {
@@ -477,6 +497,29 @@ void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, wchar_t ch
             tart_set_color(app, cx + dx, cy + dy, color);
         }
     }
+}
+
+/* True if (dx,dy) - an offset from the brush center - sits on the outline
+ * (not interior) of the size/shape footprint tart_stamp would paint, so the
+ * cursor preview can trace just the perimeter rather than filling it. */
+bool tart_brush_outline(int dx, int dy, int size, BrushShape shape) {
+    int r = (size - 1) / 2;
+    if (dx < -r || dx > r || dy < -r || dy > r) return false;
+    if (shape == BRUSH_SQUARE) {
+        return (dx == -r || dx == r || dy == -r || dy == r);
+    }
+    int r2 = r * r;
+    if (dx * dx + dy * dy > r2) return false;
+    return (dx + 1) * (dx + 1) + dy * dy > r2 || (dx - 1) * (dx - 1) + dy * dy > r2 ||
+           dx * dx + (dy + 1) * (dy + 1) > r2 || dx * dx + (dy - 1) * (dy - 1) > r2;
+}
+
+/* True if world (x,y) sits on the perimeter of the rect_w x rect_h box whose
+ * top-left is (rx,ry) - used to keep the current selection outlined on the
+ * canvas at all times, not just while it's being dragged out. */
+bool tart_rect_outline(int x, int y, int rx, int ry, int rect_w, int rect_h) {
+    if (x < rx || x >= rx + rect_w || y < ry || y >= ry + rect_h) return false;
+    return (x == rx || x == rx + rect_w - 1 || y == ry || y == ry + rect_h - 1);
 }
 
 /* Standard HSL->RGB (h in [0,360), s/l in [0,100]), each output channel 0-255. */
@@ -534,57 +577,6 @@ void tart_draw_box(int x, int y, int w, int h) {
         mvaddch(y + row, x, '|');
         mvaddch(y + row, x + w - 1, '|');
     }
-}
-
-/* One axis of a scrollbar: given how much content there is, how much of it
- * is visible, and where the view currently sits, return the thumb's start
- * offset and length along the track (both in track cells). Shared by the
- * vertical/horizontal renderer below and by the click/drag handler in
- * input.c so the two can't disagree about where the thumb is. */
-void tart_scrollbar_thumb(int content, int visible, int pos, int track_len, int *out_start, int *out_len) {
-    if (content <= visible) {
-        *out_start = 0;
-        *out_len = track_len;
-        return;
-    }
-    int max_pos = content - visible;
-    int clamped = pos < 0 ? 0 : (pos > max_pos ? max_pos : pos);
-    int len = track_len * visible / content;
-    if (len < 1) len = 1;
-    int start = (track_len - len) * clamped / max_pos;
-    *out_start = start;
-    *out_len = len;
-}
-
-/* Inverse of tart_scrollbar_thumb: given a click/drag position on the track,
- * return the content position that should be scrolled to. Centers the thumb
- * under track_pos so dragging tracks the cursor naturally. */
-void tart_scrollbar_seek(int content, int visible, int track_pos, int track_len, int *out_pos) {
-    int max_pos = content - visible;
-    if (max_pos <= 0) { *out_pos = 0; return; }
-    int len = track_len * visible / content;
-    if (len < 1) len = 1;
-    int usable = track_len - len;
-    if (usable < 1) usable = 1;
-    int centered = track_pos - len / 2;
-    if (centered < 0) centered = 0;
-    if (centered > usable) centered = usable;
-    *out_pos = centered * max_pos / usable;
-}
-
-void tart_draw_scrollbars(App *app, TartRect canvas_r) {
-    int vstart, vlen, hstart, hlen;
-    tart_scrollbar_thumb(app->canvas.height, canvas_r.h, app->viewport.offset_y, canvas_r.h, &vstart, &vlen);
-    tart_scrollbar_thumb(app->canvas.width, canvas_r.w, app->viewport.offset_x, canvas_r.w, &hstart, &hlen);
-
-    attron(COLOR_PAIR(1) | A_REVERSE);
-    for (int i = 0; i < vlen; i++) {
-        mvaddch(canvas_r.y + vstart + i, canvas_r.x + canvas_r.w, '|');
-    }
-    for (int i = 0; i < hlen; i++) {
-        mvaddch(canvas_r.y + canvas_r.h, canvas_r.x + hstart + i, '-');
-    }
-    attroff(COLOR_PAIR(1) | A_REVERSE);
 }
 
 void render(App *app) {
@@ -656,7 +648,14 @@ void render(App *app) {
     mvaddch(canvas_r.y + canvas_r.h, canvas_r.x + canvas_r.w, '+');
     attroff(COLOR_PAIR(4));
 
-    tart_draw_scrollbars(app, canvas_r);
+    /* Pencil/eraser get a live outline of their actual size+shape footprint
+     * around the cursor; other tools have their own drag preview below. */
+    bool show_brush_outline = (app->viewport.tool == TOOL_PENCIL || app->viewport.tool == TOOL_ERASER);
+    int brush_sz = (app->viewport.tool == TOOL_ERASER) ? app->viewport.eraser_size : app->viewport.brush_size;
+    BrushShape brush_shp = (app->viewport.tool == TOOL_ERASER) ? app->viewport.eraser_shape : app->viewport.brush_shape;
+    /* Tools that actually paint with current_color; eraser always clears to
+     * color 0 regardless, so previewing current_color there would mislead. */
+    bool tool_uses_color = (app->viewport.tool == TOOL_PENCIL || app->viewport.tool == TOOL_RECT);
 
     for (int dy = 0; dy < canvas_r.h; dy++) {
         for (int dx = 0; dx < canvas_r.w; dx++) {
@@ -665,20 +664,54 @@ void render(App *app) {
 
             wchar_t ch_to_draw;
             attr_t attrs = A_NORMAL;
-            unsigned char cell_color = 0;
+            int color_pair = 0;
             bool is_cursor = (world_x == app->viewport.current_mouse_world_x && world_y == app->viewport.current_mouse_world_y);
 
             if (world_x >= 0 && world_x < app->canvas.width && world_y >= 0 && world_y < app->canvas.height) {
                 ch_to_draw = app->canvas.cells[world_y * app->canvas.width + world_x];
-                cell_color = app->canvas.colors[world_y * app->canvas.width + world_x];
-                if (is_cursor) attrs |= A_REVERSE;
+                unsigned char cell_color = app->canvas.colors[world_y * app->canvas.width + world_x];
+                if (cell_color != 0) color_pair = 16 + cell_color;
             } else {
                 attrs = A_DIM;
                 ch_to_draw = (world_x % 10 == 0 && world_y % 5 == 0) ? L'+' : L'.';
-                if (is_cursor) attrs |= A_REVERSE;
             }
 
-            if (cell_color != 0) attrs |= COLOR_PAIR(16 + cell_color);
+            if (show_brush_outline &&
+                tart_brush_outline(world_x - app->viewport.current_mouse_world_x,
+                                    world_y - app->viewport.current_mouse_world_y,
+                                    brush_sz, brush_shp)) {
+                attrs = (attrs & ~A_DIM) | A_BOLD;
+                color_pair = 1;
+                /* A blank cell has no ink to tint, so the outline would be
+                 * invisible over untouched canvas - give it a visible dot
+                 * there instead of silently doing nothing. */
+                if (ch_to_draw == L' ') ch_to_draw = L'.';
+            }
+
+            /* Selection stays outlined on the canvas as long as it's held,
+             * regardless of which tool is active now - otherwise it becomes
+             * invisible the instant you release the Select drag. */
+            if (app->viewport.has_selection &&
+                tart_rect_outline(world_x, world_y, app->viewport.sel_origin_wx, app->viewport.sel_origin_wy,
+                                   app->viewport.sel_w, app->viewport.sel_h)) {
+                attrs = (attrs & ~A_DIM) | A_BOLD;
+                color_pair = 4;
+                if (ch_to_draw == L' ') ch_to_draw = L'.';
+            }
+
+            /* The exact cell under the cursor previews what a click would
+             * actually do: reversed as before, but also tinted to the color
+             * that would be painted, taking priority over the outline's
+             * generic cyan hint on the degenerate size-1 case where they
+             * coincide. */
+            if (is_cursor) {
+                attrs |= A_REVERSE;
+                if (tool_uses_color && app->viewport.current_color != 0) {
+                    color_pair = 16 + app->viewport.current_color;
+                }
+            }
+
+            if (color_pair != 0) attrs |= COLOR_PAIR(color_pair);
             attron(attrs);
             mvaddnwstr(canvas_r.y + dy, canvas_r.x + dx, ((wchar_t[]){ch_to_draw, 0}), 1);
             attroff(attrs);
@@ -742,14 +775,19 @@ void render(App *app) {
     } else if (app->viewport.prompt_mode != PROMPT_NONE) {
         tart_draw_prompt(app, status_r);
     } else {
+        /* Same dark chrome as the command-input line (tart_draw_command_palette),
+         * so the bottom row reads as one persistent command/status area
+         * whether or not you're actively typing a command. */
         const char *mode_badge = (app->viewport.mode == 'n') ? " NORMAL " : " PAN ";
         int cx = status_r.x;
 
+        attron(COLOR_PAIR(5));
         mvprintw(status_r.y, status_r.x, "%*s", status_r.w, "");
+        attroff(COLOR_PAIR(5));
 
-        attron(COLOR_PAIR(3) | A_BOLD);
+        attron(COLOR_PAIR(6) | A_BOLD);
         mvprintw(status_r.y, cx, "%s", mode_badge);
-        attroff(COLOR_PAIR(3) | A_BOLD);
+        attroff(COLOR_PAIR(6) | A_BOLD);
         cx += (int)strlen(mode_badge) + 1;
 
         {
@@ -757,7 +795,7 @@ void render(App *app) {
                                      (app->viewport.tool == TOOL_ERASER) ? "eraser" :
                                      (app->viewport.tool == TOOL_RECT)   ? "rect"   :
                                      (app->viewport.tool == TOOL_SELECT) ? "select" : "move";
-            attron(COLOR_PAIR(2));
+            attron(COLOR_PAIR(5) | A_BOLD);
             if (app->viewport.tool == TOOL_PENCIL) {
                 mvprintw(status_r.y, cx, "tool:%s '%lc'", tool_name, (wint_t)app->viewport.brush_char);
                 cx += (int)strlen("tool:") + (int)strlen(tool_name) + 5;
@@ -765,25 +803,25 @@ void render(App *app) {
                 mvprintw(status_r.y, cx, "tool:%s", tool_name);
                 cx += (int)strlen("tool:") + (int)strlen(tool_name) + 1;
             }
-            attroff(COLOR_PAIR(2));
+            attroff(COLOR_PAIR(5) | A_BOLD);
         }
 
-        attron(COLOR_PAIR(4) | A_DIM);
+        attron(COLOR_PAIR(5));
         mvprintw(status_r.y, cx, "offset[%4d,%4d]", app->viewport.offset_x, app->viewport.offset_y);
-        attroff(COLOR_PAIR(4) | A_DIM);
+        attroff(COLOR_PAIR(5));
         cx += 18;
 
-        attron(COLOR_PAIR(4) | A_DIM);
+        attron(COLOR_PAIR(5));
         mvprintw(status_r.y, cx, "cursor[%4d,%4d]", app->viewport.vim_cursor_x, app->viewport.vim_cursor_y);
-        attroff(COLOR_PAIR(4) | A_DIM);
+        attroff(COLOR_PAIR(5));
         cx += 18;
 
         const char *hint = ": commands   ?/F1 help   q quit";
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
         if (hint_x > cx) {
-            attron(COLOR_PAIR(4) | A_DIM);
+            attron(COLOR_PAIR(5));
             mvprintw(status_r.y, hint_x, "%s", hint);
-            attroff(COLOR_PAIR(4) | A_DIM);
+            attroff(COLOR_PAIR(5));
         }
     }
 
@@ -801,6 +839,10 @@ void render(App *app) {
 
     if (app->viewport.help_visible) {
         tart_draw_help_overlay(app);
+    }
+
+    if (app->viewport.about_visible) {
+        tart_draw_about_overlay(app);
     }
 
     refresh();
@@ -890,8 +932,21 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
     } else if (vp->tool == TOOL_RECT) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_RECT_FILL_TOGGLE, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
+    } else if (vp->tool == TOOL_MOVE) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_MOVE_CUT_TOGGLE, 0 };
     }
 
+    if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
+        for (int i = 0; i < (int)TART_BRUSH_SIZE_COUNT; i++) {
+            int x = TP_SIZE_SLIDER_DOT_X0 + i;
+            rows[n++] = (TartPanelRow){ TP_ROW_SIZE_SLIDER, x, x, PANEL_SIZE_SET, i };
+        }
+    }
+
+    for (int i = 0; i < (int)TART_BASIC_COLOR_COUNT; i++) {
+        int x = TP_COLOR_SLIDER_DOT_X0 + i;
+        rows[n++] = (TartPanelRow){ TP_ROW_COLOR, x, x, PANEL_COLOR_SET, i };
+    }
     rows[n++] = (TartPanelRow){ TP_ROW_COLOR, -1, -1, PANEL_COLOR_OPEN, 0 };
     return n;
 }
@@ -933,10 +988,10 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
 
     if (vp->tool == TOOL_PENCIL) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Size:%d  -  +", vp->brush_size);
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Size:%d  -  =", vp->brush_size);
         mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Shape: %s", vp->brush_shape == BRUSH_ROUND ? "round" : "square");
     } else if (vp->tool == TOOL_ERASER) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Size:%d  -  +", vp->eraser_size);
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Size:%d  -  =", vp->eraser_size);
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Shape: %s", vp->eraser_shape == BRUSH_ROUND ? "round" : "square");
     } else if (vp->tool == TOOL_RECT) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (f)", vp->rect_filled ? "on" : "off");
@@ -946,13 +1001,43 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     } else if (vp->tool == TOOL_MOVE) {
         if (vp->has_selection) mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Buf: %dx%d", vp->sel_w, vp->sel_h);
         else mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "(no selection)");
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Mode: %s (c)", vp->move_cut ? "cut" : "stamp");
     }
 
-    mvprintw(tool_r.y + TP_ROW_COLOR, tool_r.x + 1, "Color: ");
-    if (vp->current_color != 0) attron(COLOR_PAIR(16 + vp->current_color));
-    mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + 9, '#');
-    mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + 10, '#');
-    if (vp->current_color != 0) attroff(COLOR_PAIR(16 + vp->current_color));
+    /* Size slider (pencil/eraser only): "-[dots]= NN", each dot a stop in
+     * TART_BRUSH_SIZES, current one solid; the '-'/'=' bracketing chars are
+     * literally the keys that step through it one stop at a time, while
+     * clicking a dot jumps straight to that size. */
+    if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
+        int size = (vp->tool == TOOL_ERASER) ? vp->eraser_size : vp->brush_size;
+        int idx = 0;
+        for (int i = 0; i < (int)TART_BRUSH_SIZE_COUNT; i++) if (TART_BRUSH_SIZES[i] == size) idx = i;
+        mvaddch(tool_r.y + TP_ROW_SIZE_SLIDER, tool_r.x + 1, '-');
+        mvaddch(tool_r.y + TP_ROW_SIZE_SLIDER, tool_r.x + 2, '[');
+        for (int i = 0; i < (int)TART_BRUSH_SIZE_COUNT; i++) {
+            bool cur = (i == idx);
+            attr_t a = COLOR_PAIR(4) | (cur ? (A_BOLD | A_REVERSE) : A_DIM);
+            attron(a);
+            mvaddch(tool_r.y + TP_ROW_SIZE_SLIDER, tool_r.x + TP_SIZE_SLIDER_DOT_X0 + i, cur ? '#' : '.');
+            attroff(a);
+        }
+        mvaddch(tool_r.y + TP_ROW_SIZE_SLIDER, tool_r.x + TP_SIZE_SLIDER_DOT_X0 + (int)TART_BRUSH_SIZE_COUNT, ']');
+        mvprintw(tool_r.y + TP_ROW_SIZE_SLIDER, tool_r.x + TP_SIZE_SLIDER_DOT_X0 + (int)TART_BRUSH_SIZE_COUNT + 1, "=%2d", size);
+    }
+
+    /* Color slider: same idea as the size slider, but each dot is drawn in
+     * its own basic color so the row doubles as a mini legend. '['/']'
+     * step it one stop at a time; clicking a dot jumps straight to it;
+     * clicking anywhere else on the row opens the full HSL picker. */
+    mvprintw(tool_r.y + TP_ROW_COLOR, tool_r.x + 1, "Color [");
+    for (int i = 0; i < (int)TART_BASIC_COLOR_COUNT; i++) {
+        bool cur = (i == vp->quick_color_idx);
+        attr_t a = COLOR_PAIR(16 + TART_BASIC_COLORS[i]) | (cur ? (A_BOLD | A_REVERSE) : A_DIM);
+        attron(a);
+        mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + TP_COLOR_SLIDER_DOT_X0 + i, cur ? '#' : '.');
+        attroff(a);
+    }
+    mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + TP_COLOR_SLIDER_DOT_X0 + (int)TART_BASIC_COLOR_COUNT, ']');
 }
 
 int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]) {
@@ -1339,18 +1424,19 @@ void tart_draw_help_overlay(App *app) {
         "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
         "View    v toggle view/pan   wheel scroll (shift = horizontal)   Home reset",
-        "Scroll  drag the bar on the canvas' right/bottom edge to jump the view",
         "Tools   p pencil   e eraser   r rect   s select   m move (underlined letter)",
-        "Brush   t open tip palette (1-9 jump category)   [ ] size (1-21)   Tab shape",
+        "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
         "        f rect fill toggle",
+        "Select  drag to select (stays outlined); Move: drag to stamp a copy,",
+        "        repeatable by default - c toggles cut mode (clears source, one-shot)",
         "Draw    left-click hold to use tool   space+move = alt draw/pan",
-        "Color   -/= cycle 8 quick colors   click Color row for full HSL picker",
+        "Color   [ ] cycle 8 quick colors   click Color row for full HSL picker",
         "Image   Image menu > Resize Canvas (WxH)",
         "File    File menu > Save/Load, or :save <name> / :load <name>",
         "Menu    Alt+F/E/V/I/H or click to open, arrows/Left-Right, Enter, Esc closes",
         "Cmd     : or Ctrl+E, fuzzy-searches as you type, Up/Down or wheel to pick,",
-        "          Enter or click a row to run (quit, help, deselect, reset-view,",
-        "          toggle-pan, resize, save, load)",
+        "          Enter or click a row to run (quit, help, about, deselect,",
+        "          reset-view, toggle-pan, resize, save, load)",
         "",
         "Press any key to close",
     };
@@ -1375,6 +1461,60 @@ void tart_draw_help_overlay(App *app) {
     tart_draw_box(x, y, w, h);
     for (int i = 0; i < n; i++) {
         mvprintw(y + 1 + i, x + 2, "%s", lines[i]);
+    }
+    attroff(COLOR_PAIR(2));
+}
+
+void tart_draw_about_overlay(App *app) {
+    (void)app;
+    const char *banner[] = {
+        " _____  _    ____ _____",
+        "|_   _|/ \\  |  _ \\_   _|",
+        "  | | / _ \\ | |_) || |",
+        "  | |/ ___ \\|  _ < | |",
+        "  |_/_/   \\_\\_| \\_\\|_|",
+    };
+    int nb = (int)(sizeof(banner) / sizeof(banner[0]));
+
+    const char *lines[] = {
+        "Terminal ASCII (Art) Rendering Tool",
+        "",
+        "A small, suckless-flavored TUI pixel/ASCII-art editor:",
+        "pencil/eraser/rect/select/move tools, a 256-color canvas,",
+        "resizable images, plain-text .tart save/load.",
+        "",
+        "Built with C99 + ncursesw. No dependencies beyond that.",
+        "",
+        "Press any key to close",
+    };
+    int n = (int)(sizeof(lines) / sizeof(lines[0]));
+
+    int w = 0;
+    for (int i = 0; i < nb; i++) { int l = (int)strlen(banner[i]); if (l > w) w = l; }
+    for (int i = 0; i < n; i++) { int l = (int)strlen(lines[i]); if (l > w) w = l; }
+    w += 4;
+    int h = nb + n + 2;
+    int x = (COLS - w) / 2;
+    int y = (LINES - h) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    attron(COLOR_PAIR(2));
+    for (int row = 0; row < h; row++) {
+        mvprintw(y + row, x, "%*s", w, "");
+    }
+    tart_draw_box(x, y, w, h);
+    attroff(COLOR_PAIR(2));
+
+    attron(COLOR_PAIR(1) | A_BOLD);
+    for (int i = 0; i < nb; i++) {
+        mvprintw(y + 1 + i, x + 2, "%s", banner[i]);
+    }
+    attroff(COLOR_PAIR(1) | A_BOLD);
+
+    attron(COLOR_PAIR(2));
+    for (int i = 0; i < n; i++) {
+        mvprintw(y + 1 + nb + i, x + 2, "%s", lines[i]);
     }
     attroff(COLOR_PAIR(2));
 }

@@ -1,7 +1,5 @@
 #include "tart.h"
 
-#define TART_SIZE_COUNT 8
-
 static void tart_open_palette(App *app, PaletteTarget target) {
     Viewport *vp = &app->viewport;
     vp->palette_visible = true;
@@ -11,13 +9,12 @@ static void tart_open_palette(App *app, PaletteTarget target) {
 }
 
 static int tart_cycle_size(int size, int dir) {
-    static const int sizes[TART_SIZE_COUNT] = { 1, 3, 5, 7, 9, 13, 17, 21 };
     int idx = 0;
-    for (int i = 0; i < TART_SIZE_COUNT; i++) if (sizes[i] == size) idx = i;
+    for (int i = 0; i < (int)TART_BRUSH_SIZE_COUNT; i++) if (TART_BRUSH_SIZES[i] == size) idx = i;
     idx += dir;
     if (idx < 0) idx = 0;
-    if (idx > TART_SIZE_COUNT - 1) idx = TART_SIZE_COUNT - 1;
-    return sizes[idx];
+    if (idx > (int)TART_BRUSH_SIZE_COUNT - 1) idx = (int)TART_BRUSH_SIZE_COUNT - 1;
+    return TART_BRUSH_SIZES[idx];
 }
 
 /* Executes whatever a tool-panel row (or its keyboard equivalent) does. The
@@ -43,6 +40,12 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
             if (vp->tool == TOOL_ERASER) vp->eraser_size = tart_cycle_size(vp->eraser_size, 1);
             else vp->brush_size = tart_cycle_size(vp->brush_size, 1);
             break;
+        case PANEL_SIZE_SET:
+            if (value >= 0 && value < (int)TART_BRUSH_SIZE_COUNT) {
+                if (vp->tool == TOOL_ERASER) vp->eraser_size = TART_BRUSH_SIZES[value];
+                else vp->brush_size = TART_BRUSH_SIZES[value];
+            }
+            break;
         case PANEL_SHAPE_TOGGLE:
             if (vp->tool == TOOL_ERASER) vp->eraser_shape = (vp->eraser_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
             else vp->brush_shape = (vp->brush_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
@@ -50,9 +53,18 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
         case PANEL_RECT_FILL_TOGGLE:
             vp->rect_filled = !vp->rect_filled;
             break;
+        case PANEL_MOVE_CUT_TOGGLE:
+            vp->move_cut = !vp->move_cut;
+            break;
         case PANEL_COLOR_OPEN:
             vp->color_picker_visible = true;
             vp->color_slider_focus = 0;
+            break;
+        case PANEL_COLOR_SET:
+            if (value >= 0 && value < (int)TART_BASIC_COLOR_COUNT) {
+                vp->quick_color_idx = value;
+                vp->current_color = TART_BASIC_COLORS[value];
+            }
             break;
         default:
             break;
@@ -70,8 +82,19 @@ static int tart_menu_mnemonic_index(int c) {
 
 /* Every vim-motion key moves vim_cursor_x/y then re-syncs the mouse-cursor
  * shadow used for rendering the highlighted cell, and flags that the
- * viewport may need to scroll to keep it in view. */
-static void tart_move_cursor(Viewport *vp, bool *moved) {
+ * viewport may need to scroll to keep it in view. Clamped to the canvas
+ * plus the same PAN_VOID_MARGIN the view itself can pan into - vim motions
+ * can wander into the dotted "void", just not endlessly. */
+static void tart_move_cursor(App *app, bool *moved) {
+    Viewport *vp = &app->viewport;
+    int x_lo = -PAN_VOID_MARGIN;
+    int x_hi = app->canvas.width - 1 + PAN_VOID_MARGIN;
+    int y_lo = -PAN_VOID_MARGIN;
+    int y_hi = app->canvas.height - 1 + PAN_VOID_MARGIN;
+    if (vp->vim_cursor_x < x_lo) vp->vim_cursor_x = x_lo;
+    if (vp->vim_cursor_x > x_hi) vp->vim_cursor_x = x_hi;
+    if (vp->vim_cursor_y < y_lo) vp->vim_cursor_y = y_lo;
+    if (vp->vim_cursor_y > y_hi) vp->vim_cursor_y = y_hi;
     vp->current_mouse_world_x = vp->vim_cursor_x;
     vp->current_mouse_world_y = vp->vim_cursor_y;
     *moved = true;
@@ -148,6 +171,8 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         app->running = 0;
     } else if (strcmp(name, "help") == 0) {
         app->viewport.help_visible = true;
+    } else if (strcmp(name, "about") == 0) {
+        app->viewport.about_visible = true;
     } else if (strcmp(name, "deselect") == 0) {
         tart_deselect(app);
     } else if (strcmp(name, "reset-view") == 0) {
@@ -241,14 +266,18 @@ static void tart_tool_select(App *app, int wx, int wy, bool left_press, bool lef
         }
         vp->sel_w = w;
         vp->sel_h = h;
+        vp->sel_origin_wx = x0;
+        vp->sel_origin_wy = y0;
         vp->has_selection = true;
         vp->tool_dragging = false;
     }
 }
 
 /* Move tool: needs an existing selection (from tart_tool_select); dragging
- * previews the buffer following the cursor, release stamps it - the
- * original cells are untouched, this is a paste, not a cut. */
+ * previews the buffer following the cursor. In stamp mode (default,
+ * move_cut == false) release pastes a copy and the selection stays put -
+ * repeatable, source untouched. In cut mode release also clears the
+ * source region and drops the selection - a one-shot true move. */
 static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
     if (left_press && vp->has_selection) {
@@ -264,6 +293,15 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
                 tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
                 tart_set_color(app, wx + x, wy + y, vp->sel_colors[y * vp->sel_w + x]);
             }
+        }
+        if (vp->move_cut) {
+            for (int y = 0; y < vp->sel_h; y++) {
+                for (int x = 0; x < vp->sel_w; x++) {
+                    tart_draw_at(app, vp->sel_origin_wx + x, vp->sel_origin_wy + y, L' ');
+                    tart_set_color(app, vp->sel_origin_wx + x, vp->sel_origin_wy + y, 0);
+                }
+            }
+            tart_deselect(app);
         }
         vp->tool_dragging = false;
     }
@@ -459,28 +497,6 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         return;
     }
 
-    bool on_vscroll = (sx == canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h);
-    bool on_hscroll = (sy == canvas_r.y + canvas_r.h && sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w);
-    if (left_press && on_vscroll) vp->scrollbar_drag_v = true;
-    if (left_press && on_hscroll) vp->scrollbar_drag_h = true;
-    if (left_release) { vp->scrollbar_drag_v = false; vp->scrollbar_drag_h = false; }
-
-    if (vp->scrollbar_drag_v || vp->scrollbar_drag_h) {
-        if (vp->scrollbar_drag_v) {
-            int pos;
-            tart_scrollbar_seek(app->canvas.height, canvas_r.h, sy - canvas_r.y, canvas_r.h, &pos);
-            vp->offset_y = pos;
-        }
-        if (vp->scrollbar_drag_h) {
-            int pos;
-            tart_scrollbar_seek(app->canvas.width, canvas_r.w, sx - canvas_r.x, canvas_r.w, &pos);
-            vp->offset_x = pos;
-        }
-        vp->last_mouse_screen_x = sx;
-        vp->last_mouse_screen_y = sy;
-        return;
-    }
-
     int wx = (sx >= canvas_r.x) ? (sx - canvas_r.x) + vp->offset_x : -9999;
     int wy = (sy >= canvas_r.y) ? (sy - canvas_r.y) + vp->offset_y : -9999;
     vp->mouse_world_x = wx;
@@ -634,6 +650,13 @@ void handle_input(App *app) {
     if (app->viewport.help_visible) {
         if (ch != KEY_MOUSE) {
             app->viewport.help_visible = false;
+        }
+        return;
+    }
+
+    if (app->viewport.about_visible) {
+        if (ch != KEY_MOUSE) {
+            app->viewport.about_visible = false;
         }
         return;
     }
@@ -880,15 +903,15 @@ void handle_input(App *app) {
     if (ch == 't') {
         tart_apply_panel_action(app, PANEL_CHAR_OPEN, 0);
     }
-    if (ch == '[') {
+    if (ch == '-') {
         tart_apply_panel_action(app, PANEL_SIZE_DEC, 0);
     }
-    if (ch == ']') {
+    if (ch == '=') {
         tart_apply_panel_action(app, PANEL_SIZE_INC, 0);
     }
-    if (ch == '-' || ch == '=') {
+    if (ch == '[' || ch == ']') {
         Viewport *vp = &app->viewport;
-        int dir = (ch == '-') ? -1 : 1;
+        int dir = (ch == '[') ? -1 : 1;
         vp->quick_color_idx = (vp->quick_color_idx + dir + (int)TART_BASIC_COLOR_COUNT) % (int)TART_BASIC_COLOR_COUNT;
         vp->current_color = TART_BASIC_COLORS[vp->quick_color_idx];
     }
@@ -898,67 +921,70 @@ void handle_input(App *app) {
     if (ch == 'f' && app->viewport.tool == TOOL_RECT) {
         tart_apply_panel_action(app, PANEL_RECT_FILL_TOGGLE, 0);
     }
+    if (ch == 'c' && app->viewport.tool == TOOL_MOVE) {
+        tart_apply_panel_action(app, PANEL_MOVE_CUT_TOGGLE, 0);
+    }
     if (ch == 'v' || ch == 'V') {
         tart_toggle_pan(app);
     }
     if (ch == 'h') {
         app->viewport.vim_cursor_x--;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
         app->viewport.mode = 'n';
     }
     if (ch == 'l') {
         app->viewport.vim_cursor_x++;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
         app->viewport.mode = 'n';
     }
     if (ch == 'j') {
         app->viewport.vim_cursor_y++;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
         app->viewport.mode = 'n';
     }
     if (ch == 'k') {
         app->viewport.vim_cursor_y--;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
         app->viewport.mode = 'n';
     }
     if (ch == '0') {
         app->viewport.vim_cursor_x = 0;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == '$') {
         app->viewport.vim_cursor_x = app->canvas.width - 1;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'w') {
         app->viewport.vim_cursor_x += 5;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'b') {
         app->viewport.vim_cursor_x -= 5;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'G') {
         app->viewport.vim_cursor_y = app->canvas.height - 1;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'g') {
         app->viewport.vim_cursor_y = 0;
-        tart_move_cursor(&app->viewport, &vim_cursor_moved);
+        tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 4) {
-        app->viewport.offset_y += (LINES - 4) / 2;
+        app->viewport.offset_y += CANVAS_VIEW_H / 2;
         app->viewport.mode = 'n';
     }
     if (ch == 21) {
-        app->viewport.offset_y -= (LINES - 4) / 2;
+        app->viewport.offset_y -= CANVAS_VIEW_H / 2;
         app->viewport.mode = 'n';
     }
     if (ch == KEY_PPAGE) {
-        app->viewport.offset_y -= LINES - 4;
+        app->viewport.offset_y -= CANVAS_VIEW_H;
         app->viewport.mode = 'n';
     }
     if (ch == KEY_NPAGE) {
-        app->viewport.offset_y += LINES - 4;
+        app->viewport.offset_y += CANVAS_VIEW_H;
         app->viewport.mode = 'n';
     }
     if (ch == KEY_LEFT) {
