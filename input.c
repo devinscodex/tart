@@ -88,9 +88,9 @@ static int tart_menu_mnemonic_index(int c) {
 static void tart_move_cursor(App *app, bool *moved) {
     Viewport *vp = &app->viewport;
     int x_lo = -PAN_VOID_MARGIN;
-    int x_hi = app->canvas.width - 1 + PAN_VOID_MARGIN;
+    int x_hi = app->width - 1 + PAN_VOID_MARGIN;
     int y_lo = -PAN_VOID_MARGIN;
-    int y_hi = app->canvas.height - 1 + PAN_VOID_MARGIN;
+    int y_hi = app->height - 1 + PAN_VOID_MARGIN;
     if (vp->vim_cursor_x < x_lo) vp->vim_cursor_x = x_lo;
     if (vp->vim_cursor_x > x_hi) vp->vim_cursor_x = x_hi;
     if (vp->vim_cursor_y < y_lo) vp->vim_cursor_y = y_lo;
@@ -135,9 +135,9 @@ static void tart_clamp_view(App *app) {
     int view_w = CANVAS_VIEW_W;
     int view_h = CANVAS_VIEW_H;
     int h_lo = -PAN_VOID_MARGIN;
-    int h_hi = (app->canvas.width > view_w) ? (app->canvas.width - view_w + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
+    int h_hi = (app->width > view_w) ? (app->width - view_w + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
     int v_lo = -PAN_VOID_MARGIN;
-    int v_hi = (app->canvas.height > view_h) ? (app->canvas.height - view_h + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
+    int v_hi = (app->height > view_h) ? (app->height - view_h + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
     if (vp->offset_x < h_lo) vp->offset_x = h_lo;
     if (vp->offset_x > h_hi) vp->offset_x = h_hi;
     if (vp->offset_y < v_lo) vp->offset_y = v_lo;
@@ -182,17 +182,17 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
     } else if (strcmp(name, "resize") == 0) {
         int w, h;
         if (arg && tart_parse_wh(arg, &w, &h)) {
-            tart_resize_canvas(app, w, h);
+            tart_resize_doc(app, w, h);
             tart_clamp_view(app);
         } else {
             tart_open_prompt(app, PROMPT_RESIZE, "");
         }
     } else if (strcmp(name, "save") == 0) {
-        if (arg) tart_save_canvas(app, arg);
+        if (arg) tart_save_doc(app, arg);
         else tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
     } else if (strcmp(name, "load") == 0) {
         if (arg) {
-            if (tart_load_canvas(app, arg)) tart_clamp_view(app);
+            if (tart_load_doc(app, arg)) tart_clamp_view(app);
         } else {
             tart_open_prompt(app, PROMPT_LOAD, "untitled.tart");
         }
@@ -735,16 +735,16 @@ void handle_input(App *app) {
                 case PROMPT_RESIZE: {
                     int w, h;
                     if (tart_parse_wh(vp->prompt_buffer, &w, &h)) {
-                        tart_resize_canvas(app, w, h);
+                        tart_resize_doc(app, w, h);
                         tart_clamp_view(app);
                     }
                     break;
                 }
                 case PROMPT_SAVE:
-                    if (vp->prompt_buffer[0]) tart_save_canvas(app, vp->prompt_buffer);
+                    if (vp->prompt_buffer[0]) tart_save_doc(app, vp->prompt_buffer);
                     break;
                 case PROMPT_LOAD:
-                    if (vp->prompt_buffer[0] && tart_load_canvas(app, vp->prompt_buffer)) tart_clamp_view(app);
+                    if (vp->prompt_buffer[0] && tart_load_doc(app, vp->prompt_buffer)) tart_clamp_view(app);
                     break;
                 case PROMPT_CUSTOM_CHAR: {
                     wchar_t code = (wchar_t)strtol(vp->prompt_buffer, NULL, 16);
@@ -876,8 +876,8 @@ void handle_input(App *app) {
         tart_reset_view(app);
     }
     if (ch == KEY_END) {
-        int last_x = app->canvas.width - 1;
-        int last_y = app->canvas.height - 1;
+        int last_x = app->width - 1;
+        int last_y = app->height - 1;
         app->viewport.vim_cursor_x = last_x;
         app->viewport.vim_cursor_y = last_y;
         app->viewport.current_mouse_world_x = last_x;
@@ -962,7 +962,7 @@ void handle_input(App *app) {
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == '$') {
-        app->viewport.vim_cursor_x = app->canvas.width - 1;
+        app->viewport.vim_cursor_x = app->width - 1;
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'w') {
@@ -974,7 +974,7 @@ void handle_input(App *app) {
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'G') {
-        app->viewport.vim_cursor_y = app->canvas.height - 1;
+        app->viewport.vim_cursor_y = app->height - 1;
         tart_move_cursor(app, &vim_cursor_moved);
     }
     if (ch == 'g') {
