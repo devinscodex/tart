@@ -1,9 +1,16 @@
 #ifndef TART_H
 #define TART_H
 
-#include <ncurses.h>
+#ifndef _XOPEN_SOURCE_EXTENDED
+#define _XOPEN_SOURCE_EXTENDED
+#endif
+#include <ncursesw/curses.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <wchar.h>
+#include <locale.h>
+#include <math.h>
 
 #define MAX_CANVAS_WIDTH  512
 #define MAX_CANVAS_HEIGHT 256
@@ -35,6 +42,9 @@ static const TartCommand TART_COMMANDS[] = {
     { "deselect", NULL, "Clear current selection" },
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
+    { "resize", NULL, "Resize canvas (WxH)" },
+    { "save", NULL, "Save canvas to file" },
+    { "load", NULL, "Load canvas from file" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
@@ -45,10 +55,11 @@ typedef struct {
 } TartMenuDef;
 
 static const TartMenuDef TART_MENUS[] = {
-    { "File", { "quit" },                 1 },
-    { "Edit", { "deselect" },              1 },
-    { "View", { "reset-view", "toggle-pan" }, 2 },
-    { "Help", { "help" },                  1 },
+    { "File",  { "save", "load", "quit" },     3 },
+    { "Edit",  { "deselect" },                 1 },
+    { "View",  { "reset-view", "toggle-pan" }, 2 },
+    { "Image", { "resize" },                   1 },
+    { "Help",  { "help" },                     1 },
 };
 #define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
 
@@ -61,14 +72,47 @@ typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_RECT, TOOL_SELECT, TOOL_MOVE } Tar
 typedef enum { BRUSH_SQUARE, BRUSH_ROUND } BrushShape;
 
 typedef enum {
+    PROMPT_NONE,
+    PROMPT_RESIZE,
+    PROMPT_SAVE,
+    PROMPT_LOAD,
+    PROMPT_CUSTOM_CHAR,
+} TartPromptMode;
+
+typedef enum {
     PANEL_NONE,
     PANEL_SELECT_TOOL,
-    PANEL_CHAR_CYCLE,
+    PANEL_CHAR_OPEN,
     PANEL_SIZE_DEC,
     PANEL_SIZE_INC,
     PANEL_SHAPE_TOGGLE,
     PANEL_RECT_FILL_TOGGLE,
+    PANEL_FILL_CHAR_OPEN,
+    PANEL_COLOR_OPEN,
 } TartPanelAction;
+
+typedef enum { PALETTE_TARGET_PENCIL, PALETTE_TARGET_FILL } PaletteTarget;
+
+typedef struct {
+    const char *label;
+    const wchar_t *chars;
+} TartPaletteCategory;
+
+static const TartPaletteCategory TART_PALETTE[] = {
+    { "Standard",           L"`~!^()-_+=;:'\",./\\|<>[]{}" },
+    { "Extended",           L"´‾¡·" },
+    { "Shapes",             L"oOvVTL7UcCxX" },
+    { "Junctions (single)", L"├┤┬┴┼" },
+    { "Junctions (double)", L"╠╣╦╩╬" },
+    { "Junctions (mixed)",  L"╟╢╥╨" },
+    { "Lines (light)",      L"│─" },
+    { "Lines (double)",     L"║═" },
+    { "Lines (heavy)",      L"┃━" },
+    { "Special",            L" " },
+};
+#define TART_PALETTE_CAT_COUNT (sizeof(TART_PALETTE) / sizeof(TART_PALETTE[0]))
+#define PALETTE_LABEL_WIDTH 20
+#define PALETTE_CHAR_CELL_W 2
 
 typedef struct {
     int row;            /* y offset from tool_r.y */
@@ -91,13 +135,17 @@ typedef struct {
 #define TP_ROW_OPT1           10
 #define TP_ROW_OPT2           11
 #define TP_ROW_OPT3           12
+#define TP_ROW_COLOR          14
 #define TP_SIZE_DEC_X         9
 #define TP_SIZE_INC_X         12
+
+#define PAN_VOID_MARGIN 10
 
 typedef struct {
     int width;
     int height;
-    char *cells;
+    wchar_t *cells;
+    unsigned char *colors; /* 0 = no color/default; 1-255 = xterm-256 palette index */
 } Canvas;
 
 typedef struct {
@@ -110,20 +158,33 @@ typedef struct {
     int last_mouse_screen_y;
     int is_dragging;
     TartTool tool;
-    char brush_char;
+    wchar_t brush_char;
     int brush_size;
     BrushShape brush_shape;
     int eraser_size;
     BrushShape eraser_shape;
     bool rect_filled;
+    wchar_t fill_char;
+    bool palette_visible;
+    PaletteTarget palette_target;
+    int palette_hover_row;
+    int palette_hover_char;
     bool tool_dragging;
     int drag_start_wx, drag_start_wy;
     int drag_cur_wx, drag_cur_wy;
     bool has_selection;
     int sel_w, sel_h;
-    char *sel_buffer;
+    wchar_t *sel_buffer;
+    unsigned char *sel_colors;
+    unsigned char current_color;
+    bool color_picker_visible;
+    int hsl_h, hsl_s, hsl_l;
+    int color_slider_focus;
     int open_menu;
     int menu_hover_item;
+    TartPromptMode prompt_mode;
+    char prompt_buffer[256];
+    int prompt_len;
     int current_mouse_world_x;
     int current_mouse_world_y;
     int mouse_world_x;
@@ -164,15 +225,27 @@ void cleanup_canvas(Canvas *c);
 void render(App *app);
 void handle_input(App *app);
 void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *status);
-void tart_draw_at(App *app, int world_x, int world_y, char ch);
-void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, char ch);
-char tart_read_cell(App *app, int x, int y);
+void tart_draw_at(App *app, int world_x, int world_y, wchar_t ch);
+void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, wchar_t ch, unsigned char color);
+wchar_t tart_read_cell(App *app, int x, int y);
+void tart_set_color(App *app, int x, int y, unsigned char color);
+unsigned char tart_read_color(App *app, int x, int y);
+void tart_hsl_to_rgb(int h, int s, int l, int *r, int *g, int *b);
+int tart_rgb_to_256(int r, int g, int b);
+void tart_draw_color_picker(App *app);
+void tart_compute_color_picker_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_bar_x, int *out_bar_w);
 int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]);
 int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]);
 void tart_draw_tool_panel(App *app, TartRect tool_r);
 void tart_draw_menu_dropdown(App *app, TartRect menu_r);
 void tart_draw_command_palette(App *app, TartRect status);
 void tart_draw_help_overlay(App *app);
+void tart_draw_prompt(App *app, TartRect status_r);
+void tart_compute_palette_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_max_chars);
+void tart_draw_palette(App *app);
+bool tart_resize_canvas(App *app, int new_w, int new_h);
+bool tart_save_canvas(App *app, const char *path);
+bool tart_load_canvas(App *app, const char *path);
 
 #endif
 
@@ -181,15 +254,19 @@ void tart_draw_help_overlay(App *app);
 void init_canvas(Canvas *c, int w, int h) {
     c->width = w;
     c->height = h;
-    c->cells = malloc((size_t)w * h);
-    if (c->cells) memset(c->cells, ' ', (size_t)w * h);
+    c->cells = malloc(sizeof(wchar_t) * (size_t)w * h);
+    if (c->cells) wmemset(c->cells, L' ', (size_t)w * h);
+    c->colors = malloc((size_t)w * h);
+    if (c->colors) memset(c->colors, 0, (size_t)w * h);
 }
 
 void cleanup_canvas(Canvas *c) {
     if (c->cells) { free(c->cells); c->cells = NULL; }
+    if (c->colors) { free(c->colors); c->colors = NULL; }
 }
 
 void init_app(App *app) {
+    setlocale(LC_ALL, "");
     initscr();
     cbreak();
     noecho();
@@ -205,6 +282,13 @@ void init_app(App *app) {
     init_pair(2, COLOR_WHITE, COLOR_BLACK);
     init_pair(3, COLOR_BLACK, COLOR_WHITE);
     init_pair(4, COLOR_YELLOW, COLOR_BLACK);
+    /* Canvas cell colors use a dedicated 256-color palette, offset by 16 to
+     * stay clear of the chrome pairs above (COLORS/pairs here are 256/65536
+     * per terminfo, so there's ample room). Index 0 in Canvas.colors means
+     * "no color / default" and is never looked up as a pair. */
+    for (int i = 0; i < 256; i++) {
+        init_pair(16 + i, i, COLOR_BLACK);
+    }
 
     init_canvas(&app->canvas, TART_DEFAULT_CANVAS_WIDTH, TART_DEFAULT_CANVAS_HEIGHT);
     app->viewport.canvas = &app->canvas;
@@ -216,12 +300,17 @@ void init_app(App *app) {
     app->viewport.last_mouse_screen_y = 0;
     app->viewport.is_dragging = 0;
     app->viewport.tool = TOOL_PENCIL;
-    app->viewport.brush_char = '#';
+    app->viewport.brush_char = L'#';
     app->viewport.brush_size = 1;
     app->viewport.brush_shape = BRUSH_SQUARE;
     app->viewport.eraser_size = 1;
     app->viewport.eraser_shape = BRUSH_SQUARE;
     app->viewport.rect_filled = false;
+    app->viewport.fill_char = L'#';
+    app->viewport.palette_visible = false;
+    app->viewport.palette_target = PALETTE_TARGET_PENCIL;
+    app->viewport.palette_hover_row = 0;
+    app->viewport.palette_hover_char = 0;
     app->viewport.tool_dragging = false;
     app->viewport.drag_start_wx = 0;
     app->viewport.drag_start_wy = 0;
@@ -231,8 +320,18 @@ void init_app(App *app) {
     app->viewport.sel_w = 0;
     app->viewport.sel_h = 0;
     app->viewport.sel_buffer = NULL;
+    app->viewport.sel_colors = NULL;
+    app->viewport.current_color = 0;
+    app->viewport.color_picker_visible = false;
+    app->viewport.hsl_h = 0;
+    app->viewport.hsl_s = 100;
+    app->viewport.hsl_l = 50;
+    app->viewport.color_slider_focus = 0;
     app->viewport.open_menu = -1;
     app->viewport.menu_hover_item = 0;
+    app->viewport.prompt_mode = PROMPT_NONE;
+    app->viewport.prompt_len = 0;
+    memset(app->viewport.prompt_buffer, 0, sizeof(app->viewport.prompt_buffer));
     app->viewport.current_mouse_world_x = 0;
     app->viewport.current_mouse_world_y = 0;
     app->viewport.mouse_world_x = 0;
@@ -259,6 +358,8 @@ void cleanup_app(App *app) {
     fflush(stdout);
     free(app->viewport.sel_buffer);
     app->viewport.sel_buffer = NULL;
+    free(app->viewport.sel_colors);
+    app->viewport.sel_colors = NULL;
     cleanup_canvas(&app->canvas);
     endwin();
 }
@@ -274,27 +375,80 @@ void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *to
     *status  = TART_RECT(0, lines - 2, cols, 1);
 }
 
-void tart_draw_at(App *app, int world_x, int world_y, char ch) {
+void tart_draw_at(App *app, int world_x, int world_y, wchar_t ch) {
     if (world_x >= 0 && world_x < app->canvas.width && world_y >= 0 && world_y < app->canvas.height) {
         app->canvas.cells[world_y * app->canvas.width + world_x] = ch;
     }
 }
 
-char tart_read_cell(App *app, int x, int y) {
+wchar_t tart_read_cell(App *app, int x, int y) {
     if (x >= 0 && x < app->canvas.width && y >= 0 && y < app->canvas.height) {
         return app->canvas.cells[y * app->canvas.width + x];
     }
-    return ' ';
+    return L' ';
 }
 
-void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, char ch) {
+void tart_set_color(App *app, int x, int y, unsigned char color) {
+    if (x >= 0 && x < app->canvas.width && y >= 0 && y < app->canvas.height) {
+        app->canvas.colors[y * app->canvas.width + x] = color;
+    }
+}
+
+unsigned char tart_read_color(App *app, int x, int y) {
+    if (x >= 0 && x < app->canvas.width && y >= 0 && y < app->canvas.height) {
+        return app->canvas.colors[y * app->canvas.width + x];
+    }
+    return 0;
+}
+
+void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, wchar_t ch, unsigned char color) {
     int r = (size - 1) / 2;
     for (int dy = -r; dy <= r; dy++) {
         for (int dx = -r; dx <= r; dx++) {
             if (shape == BRUSH_ROUND && (dx * dx + dy * dy) > r * r) continue;
             tart_draw_at(app, cx + dx, cy + dy, ch);
+            tart_set_color(app, cx + dx, cy + dy, color);
         }
     }
+}
+
+/* Standard HSL->RGB (h in [0,360), s/l in [0,100]), each output channel 0-255. */
+void tart_hsl_to_rgb(int h, int s, int l, int *r, int *g, int *b) {
+    double H = ((h % 360) + 360) % 360 / 360.0;
+    double S = s / 100.0, L = l / 100.0;
+    double C = (1.0 - fabs(2.0 * L - 1.0)) * S;
+    double Hp = H * 6.0;
+    double X = C * (1.0 - fabs(fmod(Hp, 2.0) - 1.0));
+    double r1, g1, b1;
+    if (Hp < 1)      { r1 = C; g1 = X; b1 = 0; }
+    else if (Hp < 2) { r1 = X; g1 = C; b1 = 0; }
+    else if (Hp < 3) { r1 = 0; g1 = C; b1 = X; }
+    else if (Hp < 4) { r1 = 0; g1 = X; b1 = C; }
+    else if (Hp < 5) { r1 = X; g1 = 0; b1 = C; }
+    else             { r1 = C; g1 = 0; b1 = X; }
+    double m = L - C / 2.0;
+    *r = (int)((r1 + m) * 255.0 + 0.5);
+    *g = (int)((g1 + m) * 255.0 + 0.5);
+    *b = (int)((b1 + m) * 255.0 + 0.5);
+}
+
+/* Quantizes to the nearest color in xterm's 216-color cube (indices 16-231),
+ * using its actual (non-linear) per-channel level table. Skips the 16 base
+ * ANSI colors (theme-dependent, not reliably RGB-mappable) and the 24-step
+ * grayscale ramp - the 216-cube alone covers plenty of range for a first
+ * pass and keeps quantization simple and predictable. */
+int tart_rgb_to_256(int r, int g, int b) {
+    static const int levels[6] = { 0, 95, 135, 175, 215, 255 };
+    int best_ri = 0, best_gi = 0, best_bi = 0, best_d;
+
+    best_d = 256;
+    for (int i = 0; i < 6; i++) { int d = abs(r - levels[i]); if (d < best_d) { best_d = d; best_ri = i; } }
+    best_d = 256;
+    for (int i = 0; i < 6; i++) { int d = abs(g - levels[i]); if (d < best_d) { best_d = d; best_gi = i; } }
+    best_d = 256;
+    for (int i = 0; i < 6; i++) { int d = abs(b - levels[i]); if (d < best_d) { best_d = d; best_bi = i; } }
+
+    return 16 + 36 * best_ri + 6 * best_gi + best_bi;
 }
 
 void render(App *app) {
@@ -367,21 +521,24 @@ void render(App *app) {
             int world_x = dx + app->viewport.offset_x;
             int world_y = dy + app->viewport.offset_y;
 
-            char ch_to_draw;
+            wchar_t ch_to_draw;
             attr_t attrs = A_NORMAL;
+            unsigned char cell_color = 0;
             bool is_cursor = (world_x == app->viewport.current_mouse_world_x && world_y == app->viewport.current_mouse_world_y);
 
             if (world_x >= 0 && world_x < app->canvas.width && world_y >= 0 && world_y < app->canvas.height) {
                 ch_to_draw = app->canvas.cells[world_y * app->canvas.width + world_x];
+                cell_color = app->canvas.colors[world_y * app->canvas.width + world_x];
                 if (is_cursor) attrs |= A_REVERSE;
             } else {
                 attrs = A_DIM;
-                ch_to_draw = (world_x % 10 == 0 && world_y % 5 == 0) ? '+' : '.';
+                ch_to_draw = (world_x % 10 == 0 && world_y % 5 == 0) ? L'+' : L'.';
                 if (is_cursor) attrs |= A_REVERSE;
             }
 
+            if (cell_color != 0) attrs |= COLOR_PAIR(16 + cell_color);
             attron(attrs);
-            mvaddch(canvas_r.y + dy, canvas_r.x + dx, ch_to_draw);
+            mvaddnwstr(canvas_r.y + dy, canvas_r.x + dx, ((wchar_t[]){ch_to_draw, 0}), 1);
             attroff(attrs);
         }
     }
@@ -400,8 +557,9 @@ void render(App *app) {
                     int sx = x - app->viewport.offset_x + canvas_r.x;
                     int sy = y - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
+                        wchar_t preview_ch = border ? app->viewport.brush_char : app->viewport.fill_char;
                         attron(A_DIM | COLOR_PAIR(1));
-                        mvaddch(sy, sx, app->viewport.brush_char);
+                        mvaddnwstr(sy, sx, ((wchar_t[]){preview_ch, 0}), 1);
                         attroff(A_DIM | COLOR_PAIR(1));
                     }
                 }
@@ -415,7 +573,7 @@ void render(App *app) {
                     int sy = y - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
                         attron(A_REVERSE);
-                        mvaddch(sy, sx, tart_read_cell(app, x, y));
+                        mvaddnwstr(sy, sx, ((wchar_t[]){tart_read_cell(app, x, y), 0}), 1);
                         attroff(A_REVERSE);
                     }
                 }
@@ -429,7 +587,7 @@ void render(App *app) {
                     int sy = wy - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
                         attron(A_REVERSE | A_DIM);
-                        mvaddch(sy, sx, app->viewport.sel_buffer[y * app->viewport.sel_w + x]);
+                        mvaddnwstr(sy, sx, ((wchar_t[]){app->viewport.sel_buffer[y * app->viewport.sel_w + x], 0}), 1);
                         attroff(A_REVERSE | A_DIM);
                     }
                 }
@@ -439,6 +597,8 @@ void render(App *app) {
 
     if (app->viewport.command_mode) {
         tart_draw_command_palette(app, status_r);
+    } else if (app->viewport.prompt_mode != PROMPT_NONE) {
+        tart_draw_prompt(app, status_r);
     } else {
         const char *mode_badge = (app->viewport.mode == 'n') ? " NORMAL " : " PAN ";
         int cx = status_r.x;
@@ -457,7 +617,7 @@ void render(App *app) {
                                      (app->viewport.tool == TOOL_SELECT) ? "select" : "move";
             attron(COLOR_PAIR(2));
             if (app->viewport.tool == TOOL_PENCIL) {
-                mvprintw(status_r.y, cx, "tool:%s '%c'", tool_name, app->viewport.brush_char);
+                mvprintw(status_r.y, cx, "tool:%s '%lc'", tool_name, (wint_t)app->viewport.brush_char);
                 cx += (int)strlen("tool:") + (int)strlen(tool_name) + 5;
             } else {
                 mvprintw(status_r.y, cx, "tool:%s", tool_name);
@@ -525,6 +685,14 @@ void render(App *app) {
         tart_draw_menu_dropdown(app, menu_r);
     }
 
+    if (app->viewport.palette_visible) {
+        tart_draw_palette(app);
+    }
+
+    if (app->viewport.color_picker_visible) {
+        tart_draw_color_picker(app);
+    }
+
     if (app->viewport.help_visible) {
         tart_draw_help_overlay(app);
     }
@@ -550,7 +718,7 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
     rows[n++] = (TartPanelRow){ TP_ROW_MOVE,   -1, -1, PANEL_SELECT_TOOL, TOOL_MOVE };
 
     if (vp->tool == TOOL_PENCIL) {
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_CHAR_CYCLE, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_CHAR_OPEN, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_DEC_X, TP_SIZE_DEC_X, PANEL_SIZE_DEC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_INC_X, TP_SIZE_INC_X, PANEL_SIZE_INC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
@@ -560,7 +728,10 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
     } else if (vp->tool == TOOL_RECT) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_RECT_FILL_TOGGLE, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
     }
+
+    rows[n++] = (TartPanelRow){ TP_ROW_COLOR, -1, -1, PANEL_COLOR_OPEN, 0 };
     return n;
 }
 
@@ -594,7 +765,7 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     attroff(A_BOLD | COLOR_PAIR(1));
 
     if (vp->tool == TOOL_PENCIL) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Char: '%c'", vp->brush_char);
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Size:%d  -  +", vp->brush_size);
         mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Shape: %s", vp->brush_shape == BRUSH_ROUND ? "round" : "square");
     } else if (vp->tool == TOOL_ERASER) {
@@ -602,12 +773,19 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Shape: %s", vp->eraser_shape == BRUSH_ROUND ? "round" : "square");
     } else if (vp->tool == TOOL_RECT) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (f)", vp->rect_filled ? "on" : "off");
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
     } else if (vp->tool == TOOL_SELECT) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag to select");
     } else if (vp->tool == TOOL_MOVE) {
         if (vp->has_selection) mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Buf: %dx%d", vp->sel_w, vp->sel_h);
         else mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "(no selection)");
     }
+
+    mvprintw(tool_r.y + TP_ROW_COLOR, tool_r.x + 1, "Color: ");
+    if (vp->current_color != 0) attron(COLOR_PAIR(16 + vp->current_color));
+    mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + 9, '#');
+    mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + 10, '#');
+    if (vp->current_color != 0) attroff(COLOR_PAIR(16 + vp->current_color));
 }
 
 int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]) {
@@ -689,6 +867,294 @@ void tart_draw_command_palette(App *app, TartRect status_r) {
     attroff(A_BOLD);
 }
 
+static const char *tart_prompt_label(TartPromptMode mode) {
+    switch (mode) {
+        case PROMPT_RESIZE:      return "Resize to WxH:";
+        case PROMPT_SAVE:        return "Save as:";
+        case PROMPT_LOAD:        return "Load file:";
+        case PROMPT_CUSTOM_CHAR: return "Custom char (hex codepoint):";
+        default:                 return "";
+    }
+}
+
+void tart_draw_prompt(App *app, TartRect status_r) {
+    Viewport *vp = &app->viewport;
+    mvprintw(status_r.y, status_r.x, "%*s", status_r.w, "");
+    attron(A_BOLD);
+    mvprintw(status_r.y, status_r.x, "%s %s_", tart_prompt_label(vp->prompt_mode), vp->prompt_buffer);
+    attroff(A_BOLD);
+}
+
+void tart_compute_palette_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_max_chars) {
+    int n = (int)TART_PALETTE_CAT_COUNT;
+    int max_chars = 0;
+    for (int i = 0; i < n; i++) {
+        int l = (int)wcslen(TART_PALETTE[i].chars);
+        if (l > max_chars) max_chars = l;
+    }
+    int w = PALETTE_LABEL_WIDTH + max_chars * PALETTE_CHAR_CELL_W + 4;
+    int h = n + 5; /* top border, title, category rows, custom row, hint row, bottom border */
+    int x = (COLS - w) / 2;
+    int y = (LINES - h) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    *out_x = x;
+    *out_y = y;
+    *out_w = w;
+    *out_h = h;
+    *out_max_chars = max_chars;
+}
+
+void tart_draw_palette(App *app) {
+    Viewport *vp = &app->viewport;
+    int x, y, w, h, max_chars;
+    tart_compute_palette_geom(&x, &y, &w, &h, &max_chars);
+    (void)max_chars;
+    int n = (int)TART_PALETTE_CAT_COUNT;
+
+    attron(COLOR_PAIR(2));
+    for (int row = 0; row < h; row++) {
+        mvprintw(y + row, x, "%*s", w, "");
+    }
+    mvaddch(y, x, '+');
+    mvaddch(y, x + w - 1, '+');
+    mvaddch(y + h - 1, x, '+');
+    mvaddch(y + h - 1, x + w - 1, '+');
+    for (int i = 1; i < w - 1; i++) {
+        mvaddch(y, x + i, '-');
+        mvaddch(y + h - 1, x + i, '-');
+    }
+    for (int row = 1; row < h - 1; row++) {
+        mvaddch(y + row, x, '|');
+        mvaddch(y + row, x + w - 1, '|');
+    }
+
+    attron(A_BOLD);
+    mvprintw(y + 1, x + 2, "Select a character (click, arrows+Enter, Esc)");
+    attroff(A_BOLD);
+
+    int content_y = y + 2;
+    for (int i = 0; i < n; i++) {
+        int row_y = content_y + i;
+        mvprintw(row_y, x + 2, "%-*s", PALETTE_LABEL_WIDTH, TART_PALETTE[i].label);
+        const wchar_t *chars = TART_PALETTE[i].chars;
+        int clen = (int)wcslen(chars);
+        for (int c = 0; c < clen; c++) {
+            int cx = x + 2 + PALETTE_LABEL_WIDTH + c * PALETTE_CHAR_CELL_W;
+            bool hovered = (vp->palette_hover_row == i && vp->palette_hover_char == c);
+            if (hovered) attron(A_REVERSE);
+            mvaddnwstr(row_y, cx, ((wchar_t[]){chars[c], 0}), 1);
+            if (hovered) attroff(A_REVERSE);
+        }
+    }
+
+    int custom_row_y = content_y + n;
+    bool custom_hovered = (vp->palette_hover_row == n);
+    if (custom_hovered) attron(A_REVERSE);
+    mvprintw(custom_row_y, x + 2, "Custom character (hex codepoint)...");
+    if (custom_hovered) attroff(A_REVERSE);
+
+    mvprintw(y + h - 2, x + 2, "Esc to cancel");
+    attroff(COLOR_PAIR(2));
+}
+
+void tart_compute_color_picker_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_bar_x, int *out_bar_w) {
+    int w = 66;
+    int h = 12;
+    int x = (COLS - w) / 2;
+    int y = (LINES - h) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    *out_x = x;
+    *out_y = y;
+    *out_w = w;
+    *out_h = h;
+    *out_bar_x = x + 9;
+    *out_bar_w = 50;
+}
+
+void tart_draw_color_picker(App *app) {
+    Viewport *vp = &app->viewport;
+    int x, y, w, h, bar_x, bar_w;
+    tart_compute_color_picker_geom(&x, &y, &w, &h, &bar_x, &bar_w);
+
+    attron(COLOR_PAIR(2));
+    for (int row = 0; row < h; row++) mvprintw(y + row, x, "%*s", w, "");
+    mvaddch(y, x, '+');
+    mvaddch(y, x + w - 1, '+');
+    mvaddch(y + h - 1, x, '+');
+    mvaddch(y + h - 1, x + w - 1, '+');
+    for (int i = 1; i < w - 1; i++) {
+        mvaddch(y, x + i, '-');
+        mvaddch(y + h - 1, x + i, '-');
+    }
+    for (int row = 1; row < h - 1; row++) {
+        mvaddch(y + row, x, '|');
+        mvaddch(y + row, x + w - 1, '|');
+    }
+    attron(A_BOLD);
+    mvprintw(y + 1, x + 2, "Color Picker");
+    attroff(A_BOLD | COLOR_PAIR(2));
+
+    static const char *labels[3] = { "Hue  ", "Sat  ", "Light" };
+    for (int slider = 0; slider < 3; slider++) {
+        int row_y = y + 3 + slider;
+        bool focused = (vp->color_slider_focus == slider);
+        attron(focused ? A_BOLD : A_NORMAL);
+        mvprintw(row_y, x + 2, "%s", labels[slider]);
+        attroff(focused ? A_BOLD : A_NORMAL);
+
+        int value = (slider == 0) ? vp->hsl_h : (slider == 1) ? vp->hsl_s : vp->hsl_l;
+        int max_v = (slider == 0) ? 360 : 100;
+        for (int i = 0; i < bar_w; i++) {
+            int h2 = (slider == 0) ? (i * 360 / bar_w) : vp->hsl_h;
+            int s2 = (slider == 1) ? (i * 100 / bar_w) : vp->hsl_s;
+            int l2 = (slider == 2) ? (i * 100 / bar_w) : vp->hsl_l;
+            int r, g, b;
+            tart_hsl_to_rgb(h2, s2, l2, &r, &g, &b);
+            int idx = tart_rgb_to_256(r, g, b);
+            attron(COLOR_PAIR(16 + idx));
+            mvaddch(row_y, bar_x + i, '#');
+            attroff(COLOR_PAIR(16 + idx));
+        }
+        int marker_x = bar_x + (value * (bar_w - 1) / max_v);
+        attron(A_REVERSE);
+        mvaddch(row_y, marker_x, ' ');
+        attroff(A_REVERSE);
+        mvprintw(row_y, bar_x + bar_w + 2, "%3d", value);
+    }
+
+    attron(COLOR_PAIR(2));
+    mvprintw(y + 7, x + 2, "Preview:");
+    int r, g, b;
+    tart_hsl_to_rgb(vp->hsl_h, vp->hsl_s, vp->hsl_l, &r, &g, &b);
+    int idx = tart_rgb_to_256(r, g, b);
+    bool swatch_focused = (vp->color_slider_focus == 3);
+    attron(COLOR_PAIR(16 + idx) | (swatch_focused ? A_REVERSE : A_NORMAL));
+    mvprintw(y + 7, x + 11, "        ");
+    attroff(COLOR_PAIR(16 + idx) | (swatch_focused ? A_REVERSE : A_NORMAL));
+
+    mvprintw(y + 9, x + 2, "Tab/click bar focus, drag or arrows to adjust, Enter/click swatch = confirm, Esc cancel");
+    attroff(COLOR_PAIR(2));
+}
+
+bool tart_resize_canvas(App *app, int new_w, int new_h) {
+    if (new_w < 1) new_w = 1;
+    if (new_h < 1) new_h = 1;
+    if (new_w > MAX_CANVAS_WIDTH) new_w = MAX_CANVAS_WIDTH;
+    if (new_h > MAX_CANVAS_HEIGHT) new_h = MAX_CANVAS_HEIGHT;
+
+    wchar_t *new_cells = malloc(sizeof(wchar_t) * (size_t)new_w * new_h);
+    if (!new_cells) return false;
+    wmemset(new_cells, L' ', (size_t)new_w * new_h);
+
+    unsigned char *new_colors = malloc((size_t)new_w * new_h);
+    if (!new_colors) { free(new_cells); return false; }
+    memset(new_colors, 0, (size_t)new_w * new_h);
+
+    int copy_w = (new_w < app->canvas.width) ? new_w : app->canvas.width;
+    int copy_h = (new_h < app->canvas.height) ? new_h : app->canvas.height;
+    for (int y = 0; y < copy_h; y++) {
+        wmemcpy(&new_cells[y * new_w], &app->canvas.cells[y * app->canvas.width], (size_t)copy_w);
+        memcpy(&new_colors[y * new_w], &app->canvas.colors[y * app->canvas.width], (size_t)copy_w);
+    }
+
+    free(app->canvas.cells);
+    free(app->canvas.colors);
+    app->canvas.cells = new_cells;
+    app->canvas.colors = new_colors;
+    app->canvas.width = new_w;
+    app->canvas.height = new_h;
+    return true;
+}
+
+bool tart_save_canvas(App *app, const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    fwide(f, 1);
+    fwprintf(f, L"%d %d\n", app->canvas.width, app->canvas.height);
+    for (int y = 0; y < app->canvas.height; y++) {
+        for (int x = 0; x < app->canvas.width; x++) {
+            fputwc(app->canvas.cells[y * app->canvas.width + x], f);
+        }
+        fputwc(L'\n', f);
+    }
+
+    bool any_color = false;
+    for (int i = 0; i < app->canvas.width * app->canvas.height && !any_color; i++) {
+        if (app->canvas.colors[i] != 0) any_color = true;
+    }
+    if (any_color) {
+        fwprintf(f, L"COLOR\n");
+        for (int y = 0; y < app->canvas.height; y++) {
+            for (int x = 0; x < app->canvas.width; x++) {
+                fwprintf(f, L"%02x", app->canvas.colors[y * app->canvas.width + x]);
+            }
+            fputwc(L'\n', f);
+        }
+    }
+
+    fclose(f);
+    return true;
+}
+
+bool tart_load_canvas(App *app, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    fwide(f, 1);
+
+    int w, h;
+    if (fwscanf(f, L"%d %d", &w, &h) != 2 || w < 1 || h < 1 ||
+        w > MAX_CANVAS_WIDTH || h > MAX_CANVAS_HEIGHT) {
+        fclose(f);
+        return false;
+    }
+    fgetwc(f); /* consume the newline after the header */
+
+    wchar_t *new_cells = malloc(sizeof(wchar_t) * (size_t)w * h);
+    if (!new_cells) { fclose(f); return false; }
+    wmemset(new_cells, L' ', (size_t)w * h);
+
+    unsigned char *new_colors = malloc((size_t)w * h);
+    if (!new_colors) { free(new_cells); fclose(f); return false; }
+    memset(new_colors, 0, (size_t)w * h);
+
+    for (int y = 0; y < h; y++) {
+        int x = 0;
+        wint_t wc;
+        while (x < w && (wc = fgetwc(f)) != WEOF && wc != L'\n') {
+            new_cells[y * w + x] = (wchar_t)wc;
+            x++;
+        }
+        if (x == w) {
+            wint_t rest;
+            while ((rest = fgetwc(f)) != WEOF && rest != L'\n') {}
+        }
+    }
+
+    /* Optional COLOR block: a marker line followed by w*h 2-hex-digit
+     * palette indices, row by row. Older files without it just render at
+     * default color (new_colors is already zeroed above). */
+    wchar_t marker[8] = {0};
+    if (fwscanf(f, L"%7ls", marker) == 1 && wcscmp(marker, L"COLOR") == 0) {
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                unsigned int val = 0;
+                if (fwscanf(f, L"%2x", &val) == 1) new_colors[y * w + x] = (unsigned char)val;
+            }
+        }
+    }
+    fclose(f);
+
+    free(app->canvas.cells);
+    free(app->canvas.colors);
+    app->canvas.cells = new_cells;
+    app->canvas.colors = new_colors;
+    app->canvas.width = w;
+    app->canvas.height = h;
+    return true;
+}
+
 void tart_draw_help_overlay(App *app) {
     (void)app;
     const char *lines[] = {
@@ -700,10 +1166,15 @@ void tart_draw_help_overlay(App *app) {
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
         "View    v toggle view/pan   wheel scroll (shift = horizontal)   Home reset",
         "Tools   p pencil   e eraser   r rect   s select   m move",
-        "Brush   t cycle tip char   [ ] size   Tab shape   f rect fill toggle",
+        "Brush   t open tip palette   [ ] size (1-21)   Tab shape   f rect fill toggle",
         "Draw    left-click hold to use tool   space+move = alt draw/pan",
-        "Menu    click File/Edit/View/Help, or arrows+Enter, Esc closes",
-        "Cmd     : open command palette (quit, help, deselect, reset-view, toggle-pan)",
+        "Palette click/hover to pick, arrows+Enter, Custom... for any codepoint",
+        "Color   click Color row for HSL picker, drag/arrows to adjust, Enter to set",
+        "Image   Image menu > Resize Canvas (WxH)",
+        "File    File menu > Save/Load, or :save <name> / :load <name>",
+        "Menu    click File/Edit/View/Image/Help, or arrows+Enter, Esc closes",
+        "Cmd     : open command palette (quit, help, deselect, reset-view, toggle-pan,",
+        "          resize, save, load)",
         "",
         "Press any key to close",
     };

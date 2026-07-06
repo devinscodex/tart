@@ -1,6 +1,6 @@
 CC     = clang
 CFLAGS = -std=c99 -Wall -Werror -fsanitize=address -g -Iinclude
-LIBS   = -lncursesw -ltinfo
+LIBS   = -lncursesw -ltinfo -lm
 
 SRC    = main.c input.c
 OBJ    = $(SRC:.c=.o)

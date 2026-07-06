@@ -1,22 +1,22 @@
 #include "tart.h"
 
-static const char TART_BRUSH_CHARS[] = "#@*.o+";
-#define TART_BRUSH_CHAR_COUNT (sizeof(TART_BRUSH_CHARS) - 1)
+#define TART_SIZE_COUNT 8
 
-static char tart_cycle_char(char cur) {
-    for (size_t i = 0; i < TART_BRUSH_CHAR_COUNT; i++) {
-        if (TART_BRUSH_CHARS[i] == cur) return TART_BRUSH_CHARS[(i + 1) % TART_BRUSH_CHAR_COUNT];
-    }
-    return TART_BRUSH_CHARS[0];
+static void tart_open_palette(App *app, PaletteTarget target) {
+    Viewport *vp = &app->viewport;
+    vp->palette_visible = true;
+    vp->palette_target = target;
+    vp->palette_hover_row = 0;
+    vp->palette_hover_char = 0;
 }
 
 static int tart_cycle_size(int size, int dir) {
-    static const int sizes[] = { 1, 3, 5 };
+    static const int sizes[TART_SIZE_COUNT] = { 1, 3, 5, 7, 9, 13, 17, 21 };
     int idx = 0;
-    for (int i = 0; i < 3; i++) if (sizes[i] == size) idx = i;
+    for (int i = 0; i < TART_SIZE_COUNT; i++) if (sizes[i] == size) idx = i;
     idx += dir;
     if (idx < 0) idx = 0;
-    if (idx > 2) idx = 2;
+    if (idx > TART_SIZE_COUNT - 1) idx = TART_SIZE_COUNT - 1;
     return sizes[idx];
 }
 
@@ -26,8 +26,11 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
         case PANEL_SELECT_TOOL:
             vp->tool = (TartTool)value;
             break;
-        case PANEL_CHAR_CYCLE:
-            vp->brush_char = tart_cycle_char(vp->brush_char);
+        case PANEL_CHAR_OPEN:
+            tart_open_palette(app, PALETTE_TARGET_PENCIL);
+            break;
+        case PANEL_FILL_CHAR_OPEN:
+            tart_open_palette(app, PALETTE_TARGET_FILL);
             break;
         case PANEL_SIZE_DEC:
             if (vp->tool == TOOL_ERASER) vp->eraser_size = tart_cycle_size(vp->eraser_size, -1);
@@ -43,6 +46,10 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
             break;
         case PANEL_RECT_FILL_TOGGLE:
             vp->rect_filled = !vp->rect_filled;
+            break;
+        case PANEL_COLOR_OPEN:
+            vp->color_picker_visible = true;
+            vp->color_slider_focus = 0;
             break;
         default:
             break;
@@ -69,12 +76,48 @@ static void tart_deselect(App *app) {
     Viewport *vp = &app->viewport;
     free(vp->sel_buffer);
     vp->sel_buffer = NULL;
+    free(vp->sel_colors);
+    vp->sel_colors = NULL;
     vp->sel_w = 0;
     vp->sel_h = 0;
     vp->has_selection = false;
 }
 
-static void tart_execute_command(App *app, const char *name) {
+/* Bound panning to "canvas plus a small margin of void" - shared by the
+ * end-of-frame clamp in handle_input and anything that changes canvas
+ * dimensions (resize, load), since either can leave offset_x/y stale. */
+static void tart_clamp_view(App *app) {
+    Viewport *vp = &app->viewport;
+    int view_w = COLS - CANVAS_START_X;
+    int view_h = LINES - 4;
+    int h_lo = -PAN_VOID_MARGIN;
+    int h_hi = (app->canvas.width > view_w) ? (app->canvas.width - view_w + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
+    int v_lo = -PAN_VOID_MARGIN;
+    int v_hi = (app->canvas.height > view_h) ? (app->canvas.height - view_h + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
+    if (vp->offset_x < h_lo) vp->offset_x = h_lo;
+    if (vp->offset_x > h_hi) vp->offset_x = h_hi;
+    if (vp->offset_y < v_lo) vp->offset_y = v_lo;
+    if (vp->offset_y > v_hi) vp->offset_y = v_hi;
+}
+
+static void tart_open_prompt(App *app, TartPromptMode mode, const char *initial) {
+    Viewport *vp = &app->viewport;
+    vp->prompt_mode = mode;
+    strncpy(vp->prompt_buffer, initial, sizeof(vp->prompt_buffer) - 1);
+    vp->prompt_buffer[sizeof(vp->prompt_buffer) - 1] = '\0';
+    vp->prompt_len = (int)strlen(vp->prompt_buffer);
+}
+
+static bool tart_parse_wh(const char *s, int *w, int *h) {
+    int a = 0, b = 0;
+    if (sscanf(s, "%dx%d", &a, &b) != 2 && sscanf(s, "%d %d", &a, &b) != 2) return false;
+    if (a <= 0 || b <= 0) return false;
+    *w = a;
+    *h = b;
+    return true;
+}
+
+static void tart_execute_command(App *app, const char *name, const char *arg) {
     if (strcmp(name, "quit") == 0) {
         app->running = 0;
     } else if (strcmp(name, "help") == 0) {
@@ -85,6 +128,23 @@ static void tart_execute_command(App *app, const char *name) {
         tart_reset_view(app);
     } else if (strcmp(name, "toggle-pan") == 0) {
         tart_toggle_pan(app);
+    } else if (strcmp(name, "resize") == 0) {
+        int w, h;
+        if (arg && tart_parse_wh(arg, &w, &h)) {
+            tart_resize_canvas(app, w, h);
+            tart_clamp_view(app);
+        } else {
+            tart_open_prompt(app, PROMPT_RESIZE, "");
+        }
+    } else if (strcmp(name, "save") == 0) {
+        if (arg) tart_save_canvas(app, arg);
+        else tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
+    } else if (strcmp(name, "load") == 0) {
+        if (arg) {
+            if (tart_load_canvas(app, arg)) tart_clamp_view(app);
+        } else {
+            tart_open_prompt(app, PROMPT_LOAD, "untitled.tart");
+        }
     }
 }
 
@@ -107,7 +167,13 @@ static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_
         for (int y = y0; y <= y1; y++) {
             for (int x = x0; x <= x1; x++) {
                 bool border = (x == x0 || x == x1 || y == y0 || y == y1);
-                if (border || vp->rect_filled) tart_draw_at(app, x, y, vp->brush_char);
+                if (border) {
+                    tart_draw_at(app, x, y, vp->brush_char);
+                    tart_set_color(app, x, y, vp->current_color);
+                } else if (vp->rect_filled) {
+                    tart_draw_at(app, x, y, vp->fill_char);
+                    tart_set_color(app, x, y, vp->current_color);
+                }
             }
         }
         vp->tool_dragging = false;
@@ -133,10 +199,13 @@ static void tart_tool_select(App *app, int wx, int wy, bool left_press, bool lef
         int w = x1 - x0 + 1, h = y1 - y0 + 1;
 
         free(vp->sel_buffer);
-        vp->sel_buffer = malloc((size_t)w * h);
+        free(vp->sel_colors);
+        vp->sel_buffer = malloc(sizeof(wchar_t) * (size_t)w * h);
+        vp->sel_colors = malloc((size_t)w * h);
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 vp->sel_buffer[y * w + x] = tart_read_cell(app, x0 + x, y0 + y);
+                vp->sel_colors[y * w + x] = tart_read_color(app, x0 + x, y0 + y);
             }
         }
         vp->sel_w = w;
@@ -159,6 +228,7 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
         for (int y = 0; y < vp->sel_h; y++) {
             for (int x = 0; x < vp->sel_w; x++) {
                 tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
+                tart_set_color(app, wx + x, wy + y, vp->sel_colors[y * vp->sel_w + x]);
             }
         }
         vp->tool_dragging = false;
@@ -189,7 +259,7 @@ static bool tart_handle_menu_click(App *app, int sx, int sy, TartRect menu_r) {
         int box_x0 = mitems[vp->open_menu].x0;
         if (sy >= box_y0 && sy < box_y0 + menu->item_count && sx >= box_x0) {
             int item_idx = sy - box_y0;
-            tart_execute_command(app, menu->items[item_idx]);
+            tart_execute_command(app, menu->items[item_idx], NULL);
         }
         vp->open_menu = -1;
         return true;
@@ -215,6 +285,87 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     if (mid_release)    vp->mid_click_held = false;
     if (right_press)    vp->right_click_held = true;
     if (right_release)  vp->right_click_held = false;
+
+    /* A prompt or the command palette owns all interaction while open (same
+     * as an open dropdown menu already does via the click-away/dismiss path
+     * below) - button state above is updated so press/release stay
+     * balanced, but nothing past this point (menu clicks, tool-panel
+     * clicks, drawing/panning) should happen while the user is mid-typing. */
+    if (vp->prompt_mode != PROMPT_NONE || vp->command_mode) return;
+
+    if (vp->palette_visible) {
+        int px, py, pw, ph, max_chars;
+        tart_compute_palette_geom(&px, &py, &pw, &ph, &max_chars);
+        int content_y = py + 2;
+        int n = (int)TART_PALETTE_CAT_COUNT;
+        int rel_row = sy - content_y;
+        bool inside_popup = (sx >= px && sx < px + pw && sy >= py && sy < py + ph);
+
+        if (rel_row >= 0 && rel_row < n) {
+            int clen = (int)wcslen(TART_PALETTE[rel_row].chars);
+            int rel_char = (sx - (px + 2 + PALETTE_LABEL_WIDTH)) / PALETTE_CHAR_CELL_W;
+            if (rel_char >= 0 && rel_char < clen) {
+                vp->palette_hover_row = rel_row;
+                vp->palette_hover_char = rel_char;
+                if (left_press) {
+                    wchar_t chosen = TART_PALETTE[rel_row].chars[rel_char];
+                    if (vp->palette_target == PALETTE_TARGET_FILL) vp->fill_char = chosen;
+                    else vp->brush_char = chosen;
+                    vp->palette_visible = false;
+                }
+                return;
+            }
+        } else if (rel_row == n) {
+            vp->palette_hover_row = n;
+            if (left_press) {
+                vp->palette_visible = false;
+                tart_open_prompt(app, PROMPT_CUSTOM_CHAR, "");
+            }
+            return;
+        }
+
+        if (left_press && !inside_popup) {
+            vp->palette_visible = false;
+        }
+        return;
+    }
+
+    if (vp->color_picker_visible) {
+        int px, py, pw, ph, bar_x, bar_w;
+        tart_compute_color_picker_geom(&px, &py, &pw, &ph, &bar_x, &bar_w);
+        bool inside = (sx >= px && sx < px + pw && sy >= py && sy < py + ph);
+
+        int slider = sy - (py + 3);
+        if (slider >= 0 && slider < 3 && sx >= bar_x && sx < bar_x + bar_w) {
+            if (vp->left_click_held) {
+                int max_v = (slider == 0) ? 360 : 100;
+                int value = (sx - bar_x) * max_v / (bar_w - 1);
+                if (value < 0) value = 0;
+                if (value > max_v) value = max_v;
+                if (slider == 0) vp->hsl_h = value;
+                else if (slider == 1) vp->hsl_s = value;
+                else vp->hsl_l = value;
+                vp->color_slider_focus = slider;
+            }
+            return;
+        }
+
+        int swatch_row = py + 7;
+        if (sy == swatch_row && sx >= px + 11 && sx < px + 19) {
+            if (left_press) {
+                int r, g, b;
+                tart_hsl_to_rgb(vp->hsl_h, vp->hsl_s, vp->hsl_l, &r, &g, &b);
+                vp->current_color = (unsigned char)tart_rgb_to_256(r, g, b);
+                vp->color_picker_visible = false;
+            }
+            return;
+        }
+
+        if (left_press && !inside) {
+            vp->color_picker_visible = false;
+        }
+        return;
+    }
 
     if (wheel_up || wheel_down) {
         int delta = wheel_up ? -4 : 4;
@@ -267,10 +418,10 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         bool acting = vp->left_click_held || vp->space_held;
         switch (vp->tool) {
             case TOOL_PENCIL:
-                if (acting) tart_stamp(app, wx, wy, vp->brush_size, vp->brush_shape, vp->brush_char);
+                if (acting) tart_stamp(app, wx, wy, vp->brush_size, vp->brush_shape, vp->brush_char, vp->current_color);
                 break;
             case TOOL_ERASER:
-                if (acting) tart_stamp(app, wx, wy, vp->eraser_size, vp->eraser_shape, ' ');
+                if (acting) tart_stamp(app, wx, wy, vp->eraser_size, vp->eraser_shape, L' ', 0);
                 break;
             case TOOL_RECT:
                 tart_tool_rect(app, wx, wy, left_press, left_release);
@@ -379,24 +530,39 @@ void handle_input(App *app) {
         return;
     }
 
-    if (app->viewport.command_mode) {
+    if (app->viewport.command_mode && ch != KEY_MOUSE) {
         if (ch == '\n' || ch == KEY_ENTER) {
             const char *buf = app->viewport.command_buffer;
-            const char *resolved = NULL;
+            const char *space = strchr(buf, ' ');
+            char verb[64];
+            const char *arg = NULL;
+            if (space) {
+                size_t vlen = (size_t)(space - buf);
+                if (vlen >= sizeof(verb)) vlen = sizeof(verb) - 1;
+                memcpy(verb, buf, vlen);
+                verb[vlen] = '\0';
+                arg = space + 1;
+                while (*arg == ' ') arg++;
+                if (*arg == '\0') arg = NULL;
+            } else {
+                strncpy(verb, buf, sizeof(verb) - 1);
+                verb[sizeof(verb) - 1] = '\0';
+            }
 
+            const char *resolved = NULL;
             for (size_t i = 0; i < TART_COMMAND_COUNT; i++) {
-                if (strcmp(buf, TART_COMMANDS[i].name) == 0 ||
-                    (TART_COMMANDS[i].alias && strcmp(buf, TART_COMMANDS[i].alias) == 0)) {
+                if (strcmp(verb, TART_COMMANDS[i].name) == 0 ||
+                    (TART_COMMANDS[i].alias && strcmp(verb, TART_COMMANDS[i].alias) == 0)) {
                     resolved = TART_COMMANDS[i].name;
                     break;
                 }
             }
-            if (!resolved && buf[0] != '\0') {
+            if (!resolved && !space && verb[0] != '\0') {
                 const char *candidate = NULL;
                 int matches = 0;
-                size_t len = strlen(buf);
+                size_t len = strlen(verb);
                 for (size_t i = 0; i < TART_COMMAND_COUNT; i++) {
-                    if (strncmp(TART_COMMANDS[i].name, buf, len) == 0) {
+                    if (strncmp(TART_COMMANDS[i].name, verb, len) == 0) {
                         candidate = TART_COMMANDS[i].name;
                         matches++;
                     }
@@ -404,7 +570,7 @@ void handle_input(App *app) {
                 if (matches == 1) resolved = candidate;
             }
 
-            if (resolved) tart_execute_command(app, resolved);
+            if (resolved) tart_execute_command(app, resolved, arg);
 
             app->viewport.command_mode = 0;
             app->viewport.mode = 'n';
@@ -424,6 +590,48 @@ void handle_input(App *app) {
         return;
     }
 
+    if (app->viewport.prompt_mode != PROMPT_NONE && ch != KEY_MOUSE) {
+        Viewport *vp = &app->viewport;
+        if (ch == '\n' || ch == KEY_ENTER) {
+            switch (vp->prompt_mode) {
+                case PROMPT_RESIZE: {
+                    int w, h;
+                    if (tart_parse_wh(vp->prompt_buffer, &w, &h)) {
+                        tart_resize_canvas(app, w, h);
+                        tart_clamp_view(app);
+                    }
+                    break;
+                }
+                case PROMPT_SAVE:
+                    if (vp->prompt_buffer[0]) tart_save_canvas(app, vp->prompt_buffer);
+                    break;
+                case PROMPT_LOAD:
+                    if (vp->prompt_buffer[0] && tart_load_canvas(app, vp->prompt_buffer)) tart_clamp_view(app);
+                    break;
+                case PROMPT_CUSTOM_CHAR: {
+                    wchar_t code = (wchar_t)strtol(vp->prompt_buffer, NULL, 16);
+                    if (code > 0) vp->brush_char = code;
+                    break;
+                }
+                default:
+                    break;
+            }
+            vp->prompt_mode = PROMPT_NONE;
+            vp->prompt_len = 0;
+            memset(vp->prompt_buffer, 0, sizeof(vp->prompt_buffer));
+        } else if (ch == 27) {
+            vp->prompt_mode = PROMPT_NONE;
+            vp->prompt_len = 0;
+            memset(vp->prompt_buffer, 0, sizeof(vp->prompt_buffer));
+        } else if ((ch == KEY_BACKSPACE || ch == 127) && vp->prompt_len > 0) {
+            vp->prompt_buffer[--vp->prompt_len] = '\0';
+        } else if (ch >= 32 && ch < 127 && vp->prompt_len < 255) {
+            vp->prompt_buffer[vp->prompt_len++] = ch;
+            vp->prompt_buffer[vp->prompt_len] = '\0';
+        }
+        return;
+    }
+
     if (app->viewport.open_menu >= 0 && ch != KEY_MOUSE) {
         int n = TART_MENUS[app->viewport.open_menu].item_count;
         if (ch == 27) {
@@ -433,8 +641,68 @@ void handle_input(App *app) {
         } else if (ch == KEY_DOWN) {
             app->viewport.menu_hover_item = (app->viewport.menu_hover_item + 1) % n;
         } else if (ch == '\n' || ch == KEY_ENTER) {
-            tart_execute_command(app, TART_MENUS[app->viewport.open_menu].items[app->viewport.menu_hover_item]);
+            tart_execute_command(app, TART_MENUS[app->viewport.open_menu].items[app->viewport.menu_hover_item], NULL);
             app->viewport.open_menu = -1;
+        }
+        return;
+    }
+
+    if (app->viewport.palette_visible && ch != KEY_MOUSE) {
+        Viewport *vp = &app->viewport;
+        int n = (int)TART_PALETTE_CAT_COUNT;
+        if (ch == 27) {
+            vp->palette_visible = false;
+        } else if (ch == KEY_UP || ch == KEY_DOWN) {
+            vp->palette_hover_row = (vp->palette_hover_row + (ch == KEY_UP ? -1 : 1) + (n + 1)) % (n + 1);
+            if (vp->palette_hover_row < n) {
+                int clen = (int)wcslen(TART_PALETTE[vp->palette_hover_row].chars);
+                if (vp->palette_hover_char >= clen) vp->palette_hover_char = clen - 1;
+            } else {
+                vp->palette_hover_char = 0;
+            }
+        } else if (ch == KEY_LEFT || ch == KEY_RIGHT) {
+            if (vp->palette_hover_row < n) {
+                int clen = (int)wcslen(TART_PALETTE[vp->palette_hover_row].chars);
+                vp->palette_hover_char = (vp->palette_hover_char + (ch == KEY_LEFT ? -1 : 1) + clen) % clen;
+            }
+        } else if (ch == '\n' || ch == KEY_ENTER) {
+            if (vp->palette_hover_row < n) {
+                wchar_t chosen = TART_PALETTE[vp->palette_hover_row].chars[vp->palette_hover_char];
+                if (vp->palette_target == PALETTE_TARGET_FILL) vp->fill_char = chosen;
+                else vp->brush_char = chosen;
+                vp->palette_visible = false;
+            } else {
+                vp->palette_visible = false;
+                tart_open_prompt(app, PROMPT_CUSTOM_CHAR, "");
+            }
+        }
+        return;
+    }
+
+    if (app->viewport.color_picker_visible && ch != KEY_MOUSE) {
+        Viewport *vp = &app->viewport;
+        if (ch == 27) {
+            vp->color_picker_visible = false;
+        } else if (ch == 9) {
+            vp->color_slider_focus = (vp->color_slider_focus + 1) % 3;
+        } else if (ch == KEY_LEFT || ch == KEY_RIGHT) {
+            int dir = (ch == KEY_LEFT) ? -1 : 1;
+            if (vp->color_slider_focus == 0) {
+                vp->hsl_h = ((vp->hsl_h + dir * 5) % 360 + 360) % 360;
+            } else if (vp->color_slider_focus == 1) {
+                vp->hsl_s += dir * 5;
+                if (vp->hsl_s < 0) vp->hsl_s = 0;
+                if (vp->hsl_s > 100) vp->hsl_s = 100;
+            } else {
+                vp->hsl_l += dir * 5;
+                if (vp->hsl_l < 0) vp->hsl_l = 0;
+                if (vp->hsl_l > 100) vp->hsl_l = 100;
+            }
+        } else if (ch == '\n' || ch == KEY_ENTER) {
+            int r, g, b;
+            tart_hsl_to_rgb(vp->hsl_h, vp->hsl_s, vp->hsl_l, &r, &g, &b);
+            vp->current_color = (unsigned char)tart_rgb_to_256(r, g, b);
+            vp->color_picker_visible = false;
         }
         return;
     }
@@ -496,7 +764,7 @@ void handle_input(App *app) {
         app->viewport.tool = TOOL_MOVE;
     }
     if (ch == 't') {
-        tart_apply_panel_action(app, PANEL_CHAR_CYCLE, 0);
+        tart_apply_panel_action(app, PANEL_CHAR_OPEN, 0);
     }
     if (ch == '[') {
         tart_apply_panel_action(app, PANEL_SIZE_DEC, 0);
@@ -643,12 +911,5 @@ void handle_input(App *app) {
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
     }
 
-    {
-        int h_limit = app->canvas.width / 2 + 20;
-        int v_limit = app->canvas.height / 2 + 20;
-        if (app->viewport.offset_x < -h_limit) app->viewport.offset_x = -h_limit;
-        if (app->viewport.offset_x >  h_limit) app->viewport.offset_x =  h_limit;
-        if (app->viewport.offset_y < -v_limit) app->viewport.offset_y = -v_limit;
-        if (app->viewport.offset_y >  v_limit) app->viewport.offset_y =  v_limit;
-    }
+    tart_clamp_view(app);
 }
