@@ -60,6 +60,9 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
         case PANEL_MOVE_CUT_TOGGLE:
             vp->move_cut = !vp->move_cut;
             break;
+        case PANEL_FILL_RANDOM_TOGGLE:
+            vp->fill_random = !vp->fill_random;
+            break;
         case PANEL_COLOR_OPEN:
             vp->color_picker_visible = true;
             vp->color_slider_focus = 0;
@@ -712,6 +715,9 @@ static void tart_apply_mouse(App *app, int sx, int sy,
             case TOOL_CURVE:
                 tart_tool_curve(app, wx, wy, left_press, left_release);
                 break;
+            case TOOL_FILL:
+                if (left_press) tart_flood_fill(app, wx, wy);
+                break;
         }
     }
 
@@ -1112,6 +1118,9 @@ void handle_input(App *app) {
     if (ch == 'T') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_TRI);
     }
+    if (ch == 'F') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_FILL);
+    }
     if (ch == 'H') {
         app->viewport.history_visible = true;
     }
@@ -1140,6 +1149,9 @@ void handle_input(App *app) {
     }
     if (ch == 'f' && app->viewport.tool == TOOL_RECT) {
         tart_apply_panel_action(app, PANEL_RECT_FILL_TOGGLE, 0);
+    }
+    if (ch == 'f' && app->viewport.tool == TOOL_FILL) {
+        tart_apply_panel_action(app, PANEL_FILL_RANDOM_TOGGLE, 0);
     }
     if (ch == 'c' && app->viewport.tool == TOOL_MOVE) {
         tart_apply_panel_action(app, PANEL_MOVE_CUT_TOGGLE, 0);

@@ -116,7 +116,7 @@ typedef struct {
 
 typedef enum {
     TOOL_PENCIL, TOOL_ERASER, TOOL_RECT, TOOL_SELECT, TOOL_MOVE,
-    TOOL_LINE, TOOL_CURVE, TOOL_ELLIPSE, TOOL_TRI,
+    TOOL_LINE, TOOL_CURVE, TOOL_ELLIPSE, TOOL_TRI, TOOL_FILL,
 } TartTool;
 typedef enum { BRUSH_SQUARE, BRUSH_ROUND } BrushShape;
 
@@ -164,6 +164,7 @@ typedef enum {
     PANEL_RECT_FILL_TOGGLE,
     PANEL_FILL_CHAR_OPEN,
     PANEL_MOVE_CUT_TOGGLE,
+    PANEL_FILL_RANDOM_TOGGLE,
     PANEL_COLOR_OPEN,
     PANEL_COLOR_SET,     /* value = index into TART_BASIC_COLORS */
 } TartPanelAction;
@@ -227,12 +228,13 @@ typedef struct {
 #define TP_ROW_CURVE          9
 #define TP_ROW_ELLIPSE        10
 #define TP_ROW_TRI            11
-#define TP_ROW_OPTIONS_HEADER 13
-#define TP_ROW_OPT1           14
-#define TP_ROW_OPT2           15
-#define TP_ROW_OPT3           16
-#define TP_ROW_SIZE_SLIDER    17    /* pencil/eraser only: "-[dots]= NN" */
-#define TP_ROW_COLOR          18    /* "Color [dots]" - dots double as quick-jump targets */
+#define TP_ROW_FILL           12
+#define TP_ROW_OPTIONS_HEADER 14
+#define TP_ROW_OPT1           15
+#define TP_ROW_OPT2           16
+#define TP_ROW_OPT3           17
+#define TP_ROW_SIZE_SLIDER    18    /* pencil/eraser only: "-[dots]= NN" */
+#define TP_ROW_COLOR          19    /* "Color [dots]" - dots double as quick-jump targets */
 #define TP_SIZE_DEC_X         9
 #define TP_SIZE_INC_X         12
 #define TP_SIZE_SLIDER_DOT_X0 3     /* first size-slider dot's column offset from tool_r.x */
@@ -307,6 +309,7 @@ typedef struct {
     wchar_t *sel_buffer;
     unsigned char *sel_colors;
     bool move_cut;  /* false = stamp (keep source, repeatable); true = cut (clears source, one-shot) */
+    bool fill_random;   /* bucket fill draws random glyphs from fill_char's palette row */
 
     /* Color: current_color paints; the HSL picker and the '['/']' quick
      * palette are two different ways of setting it. */
@@ -399,6 +402,7 @@ void tart_undo_clear(App *app);
 typedef void (*TartPlotFn)(int wx, int wy, void *ctx);
 void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, int cy, TartPlotFn plot, void *ctx);
 void tart_draw_history_overlay(App *app);
+void tart_flood_fill(App *app, int x, int y);
 void render(App *app);
 void handle_input(App *app);
 void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *anim, TartRect *status);
@@ -634,6 +638,7 @@ void tart_undo_clear(App *app) {
 
 void init_app(App *app) {
     setlocale(LC_ALL, "");
+    srand((unsigned)time(NULL));    /* random-texture fill */
     initscr();
     cbreak();
     noecho();
@@ -850,6 +855,65 @@ void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, in
         default:
             break;
     }
+}
+
+/* Bucket fill: repaints the 4-connected region of cells matching the start
+ * cell's glyph+color with fill_char in current_color. Random mode instead
+ * draws each cell from the palette category containing fill_char - a
+ * texture fill (pick '.' for scattered punctuation, 'o' for shape glyphs);
+ * clicking a random-filled region again re-rolls it. Pushes its own undo
+ * entry, and only once it knows it will actually change something. */
+void tart_flood_fill(App *app, int x, int y) {
+    Canvas *c = tart_canvas(app);
+    Viewport *vp = &app->viewport;
+    int w = c->width, h = c->height;
+    if (x < 0 || x >= w || y < 0 || y >= h) return;
+
+    wchar_t from_ch = c->cells[y * w + x];
+    unsigned char from_col = c->colors[y * w + x];
+    if (!vp->fill_random && from_ch == vp->fill_char && from_col == vp->current_color) return;
+
+    const wchar_t *set = NULL;
+    int set_len = 0;
+    if (vp->fill_random) {
+        for (size_t i = 0; i < TART_PALETTE_CAT_COUNT; i++) {
+            if (wcschr(TART_PALETTE[i].chars, vp->fill_char)) {
+                set = TART_PALETTE[i].chars;
+                set_len = (int)wcslen(set);
+                break;
+            }
+        }
+    }
+
+    /* Iterative fill with an explicit stack; visited[] (marked at push time)
+     * keeps every cell pushed at most once, which both bounds the stack at
+     * w*h and makes random re-rolls terminate even when a rolled glyph
+     * happens to equal the glyph being replaced. */
+    int *stack = malloc(sizeof(int) * (size_t)w * h);
+    unsigned char *visited = calloc((size_t)w * h, 1);
+    if (!stack || !visited) { free(stack); free(visited); return; }
+
+    tart_undo_push(app, "fill");
+    int top = 0;
+    visited[y * w + x] = 1;
+    stack[top++] = y * w + x;
+    while (top > 0) {
+        int idx = stack[--top];
+        c->cells[idx] = (set_len > 0) ? set[rand() % set_len] : vp->fill_char;
+        c->colors[idx] = vp->current_color;
+        int cx = idx % w, cy = idx / w;
+        int nbr[4] = { idx - 1, idx + 1, idx - w, idx + w };
+        bool ok[4] = { cx > 0, cx < w - 1, cy > 0, cy < h - 1 };
+        for (int i = 0; i < 4; i++) {
+            if (ok[i] && !visited[nbr[i]] &&
+                c->cells[nbr[i]] == from_ch && c->colors[nbr[i]] == from_col) {
+                visited[nbr[i]] = 1;
+                stack[top++] = nbr[i];
+            }
+        }
+    }
+    free(stack);
+    free(visited);
 }
 
 /* Standard HSL->RGB (h in [0,360), s/l in [0,100]), each output channel 0-255. */
@@ -1187,7 +1251,8 @@ void render(App *app) {
                                      (app->viewport.tool == TOOL_MOVE)   ? "move"   :
                                      (app->viewport.tool == TOOL_LINE)   ? "line"   :
                                      (app->viewport.tool == TOOL_CURVE)  ? "curve"  :
-                                     (app->viewport.tool == TOOL_ELLIPSE) ? "ellipse" : "triangle";
+                                     (app->viewport.tool == TOOL_ELLIPSE) ? "ellipse" :
+                                     (app->viewport.tool == TOOL_TRI)    ? "triangle" : "fill";
             attron(COLOR_PAIR(5) | A_BOLD);
             if (app->viewport.tool == TOOL_PENCIL) {
                 mvprintw(status_r.y, cx, "tool:%s '%lc'", tool_name, (wint_t)app->viewport.brush_char);
@@ -1388,6 +1453,7 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
     rows[n++] = (TartPanelRow){ TP_ROW_CURVE,   -1, -1, PANEL_SELECT_TOOL, TOOL_CURVE };
     rows[n++] = (TartPanelRow){ TP_ROW_ELLIPSE, -1, -1, PANEL_SELECT_TOOL, TOOL_ELLIPSE };
     rows[n++] = (TartPanelRow){ TP_ROW_TRI,     -1, -1, PANEL_SELECT_TOOL, TOOL_TRI };
+    rows[n++] = (TartPanelRow){ TP_ROW_FILL,    -1, -1, PANEL_SELECT_TOOL, TOOL_FILL };
 
     if (vp->tool == TOOL_PENCIL) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_CHAR_OPEN, 0 };
@@ -1406,6 +1472,9 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
     } else if (vp->tool == TOOL_LINE || vp->tool == TOOL_CURVE ||
                vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_CHAR_OPEN, 0 };
+    } else if (vp->tool == TOOL_FILL) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_FILL_RANDOM_TOGGLE, 0 };
     }
 
     if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
@@ -1440,6 +1509,7 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         { TP_ROW_CURVE,   "Curve",    TOOL_CURVE },
         { TP_ROW_ELLIPSE, "Ellipse",  TOOL_ELLIPSE },
         { TP_ROW_TRI,     "Triangle", TOOL_TRI },
+        { TP_ROW_FILL,    "Fill",     TOOL_FILL },
     };
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
         bool sel = (vp->tool == tools[i].tool);
@@ -1463,7 +1533,8 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
                           (vp->tool == TOOL_MOVE)   ? "Move" :
                           (vp->tool == TOOL_LINE)   ? "Line" :
                           (vp->tool == TOOL_CURVE)  ? "Curve" :
-                          (vp->tool == TOOL_ELLIPSE) ? "Ellipse" : "Triangle";
+                          (vp->tool == TOOL_ELLIPSE) ? "Ellipse" :
+                          (vp->tool == TOOL_TRI)    ? "Triangle" : "Fill";
     attron(A_BOLD | COLOR_PAIR(1));
     mvprintw(tool_r.y + TP_ROW_OPTIONS_HEADER, tool_r.x + 1, "%s", header);
     attroff(A_BOLD | COLOR_PAIR(1));
@@ -1493,6 +1564,10 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     } else if (vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag bounding box");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
+    } else if (vp->tool == TOOL_FILL) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Click fills region");
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->fill_char);
+        mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Random: %s (f)", vp->fill_random ? "on" : "off");
     }
 
     /* Size slider (pencil/eraser only): "-[dots]= NN", each dot a stop in
@@ -2073,6 +2148,9 @@ void tart_draw_help_overlay(App *app) {
         "        curve: drag the endpoints, then move to bend, click to set;",
         "        ellipse/triangle fit the dragged box (cells are ~2:1, so a",
         "        round-looking circle needs a box about twice as wide as tall)",
+        "Fill    F bucket fill - click repaints the connected region with the",
+        "        fill char; f toggles random texture mode (each cell rolls a",
+        "        glyph from the fill char's palette row; click again re-rolls)",
         "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
         "        f rect fill toggle",
         "Select  drag to select (stays outlined); Move: drag to stamp a copy,",
@@ -2135,7 +2213,7 @@ void tart_draw_about_overlay(App *app) {
         "Terminal ASCII (Art) Rendering Tool  v" TART_VERSION,
         "",
         "A small, suckless-flavored TUI ASCII-art and animation editor:",
-        "draw/eraser/rect/line/curve/ellipse/triangle/select/move tools,",
+        "draw/eraser/rect/line/curve/ellipse/triangle/fill/select/move,",
         "a 256-color canvas, stacked layers, animation frames with",
         "playback and onion skin, undo/redo with a history viewer,",
         "resizable images, plain-text .tart save/load.",
