@@ -203,6 +203,10 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         app->viewport.help_visible = true;
     } else if (strcmp(name, "about") == 0) {
         app->viewport.about_visible = true;
+    } else if (strcmp(name, "undo") == 0) {
+        tart_undo(app);
+    } else if (strcmp(name, "redo") == 0) {
+        tart_redo(app);
     } else if (strcmp(name, "deselect") == 0) {
         tart_deselect(app);
     } else if (strcmp(name, "reset-view") == 0) {
@@ -266,6 +270,7 @@ static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_
         int y0 = vp->drag_start_wy, y1 = wy;
         if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
         if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+        tart_undo_push(app);
         for (int y = y0; y <= y1; y++) {
             for (int x = x0; x <= x1; x++) {
                 bool border = (x == x0 || x == x1 || y == y0 || y == y1);
@@ -336,6 +341,7 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
         vp->drag_cur_wy = wy;
     }
     if (left_release && vp->tool_dragging) {
+        tart_undo_push(app);
         for (int y = 0; y < vp->sel_h; y++) {
             for (int x = 0; x < vp->sel_w; x++) {
                 tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
@@ -600,6 +606,16 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         }
     } else {
         bool acting = vp->left_click_held || vp->space_held;
+        /* One undo entry per stroke, not per stamped cell: snapshot when a
+         * draw/erase gesture opens, and let it close when the press/space
+         * ends. */
+        if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
+            if (acting && !vp->stroke_open) {
+                tart_undo_push(app);
+                vp->stroke_open = true;
+            }
+        }
+        if (!acting) vp->stroke_open = false;
         switch (vp->tool) {
             case TOOL_PENCIL:
                 if (acting) tart_stamp(app, wx, wy, vp->brush_size, vp->brush_shape, vp->brush_char, vp->current_color);
@@ -976,7 +992,7 @@ void handle_input(App *app) {
     if (ch == KEY_F(1) || ch == '?') {
         app->viewport.help_visible = true;
     }
-    if (ch == 'p' || ch == 'P') {
+    if (ch == 'd' || ch == 'D') {
         app->viewport.tool = TOOL_PENCIL;
     }
     if (ch == 'e' || ch == 'E') {
@@ -1027,11 +1043,17 @@ void handle_input(App *app) {
     if (ch == 'a') {
         tart_anim_action(app, ANIM_FRAME_ADD);
     }
-    if (ch == 'd') {
+    if (ch == 'A') {
         tart_anim_action(app, ANIM_FRAME_DUP);
     }
-    if (ch == 'D') {
+    if (ch == 'x') {
         tart_anim_action(app, ANIM_FRAME_DEL);
+    }
+    if (ch == 'u') {
+        tart_undo(app);
+    }
+    if (ch == 'U') {
+        tart_redo(app);
     }
     if (ch == '{') {
         tart_anim_action(app, ANIM_LAYER_PREV);

@@ -29,10 +29,11 @@ by a small margin.
 
 | | |
 |---|---|
-| Tools | `p` pencil, `e` eraser, `r` rect, `s` select, `m` move |
+| Tools | `d` draw, `e` eraser, `r` rect, `s` select, `m` move |
 | Brush | `t` char palette, `-`/`=` size, `Tab` shape, `f` rect-fill, `c` move cut/stamp |
+| Edit | `u` undo, `U` redo (one step per stroke/stamp; structural ops reset history) |
 | Color | `[`/`]` quick palette, click the Color row for the HSL picker |
-| Frames | `n`/`N` next/prev, `a` add blank, `d` duplicate, `D` delete, `Enter` play/stop, `o` onion skin, `:fps N` |
+| Frames | `n`/`N` next/prev, `a` add blank, `A` duplicate, `x` delete, `Enter` play/stop, `o` onion skin, `:fps N` |
 | Layers | `{`/`}` prev/next, `:layer-add` / `:layer-del` (or the Layer menu) |
 | Cursor | `h j k l`, `w`/`b` (±5), `0`/`$`, `g`/`G` |
 | View | arrows pan, wheel scrolls, Alt+wheel / Shift+wheel / tilt-wheel scrolls horizontally, `v` pan mode, `Home` reset, `End` jump to bottom-right |
@@ -48,7 +49,7 @@ grid — adding a layer adds it to every frame), each an independent
 composites a frame's layers top-down and the topmost inked glyph wins, so a
 character layer stacks over a background layer. Editing (all tools, select,
 move) applies to the active layer of the active frame only; duplicating a
-frame (`d`) copies all its layers, which is how a static background carries
+frame (`A`) copies all its layers, which is how a static background carries
 across an animation.
 
 ## Animation guide
@@ -70,7 +71,7 @@ The keyframe workflow, using the walk as the model:
 
 1. Draw the background on layer 1 (ground, scenery). `:layer-add`, then draw
    the character's first pose on layer 2.
-2. `d` duplicates the current frame — all layers copied — so the background
+2. `A` duplicates the current frame — all layers copied — so the background
    carries forward and the pose is your starting point for the next key.
 3. Nudge the copy into the next pose. Select+move only touches the active
    layer, so you can drag a limb without carving a hole in the background.

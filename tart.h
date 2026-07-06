@@ -17,7 +17,7 @@
 #include <ctype.h>
 #include <time.h>
 
-#define TART_VERSION "0.2.0"
+#define TART_VERSION "0.3.0"
 
 /* Coordinate convention used throughout: sx/sy name a screen (terminal cell)
  * position; wx/wy name a world (canvas/document) position. offset_x/offset_y
@@ -67,6 +67,8 @@ static const TartCommand TART_COMMANDS[] = {
     { "quit", "q",     "Quit TART" },
     { "help", "binds", "Show keybindings" },
     { "about", NULL,   "About TART" },
+    { "undo", "u",     "Undo last edit" },
+    { "redo", NULL,    "Redo undone edit" },
     { "deselect", NULL, "Clear current selection" },
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
@@ -95,7 +97,7 @@ typedef struct {
 
 static const TartMenuDef TART_MENUS[] = {
     { "File",  { "save", "load", "quit" },              3 },
-    { "Edit",  { "deselect" },                          1 },
+    { "Edit",  { "undo", "redo", "deselect" },          3 },
     { "View",  { "reset-view", "toggle-pan", "onion" }, 3 },
     { "Image", { "resize" },                            1 },
     { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
@@ -244,6 +246,19 @@ typedef struct {
     Canvas layers[MAX_LAYERS];
 } Frame;
 
+/* One undo/redo entry: a full snapshot of a single layer canvas, taken just
+ * before an edit gesture (stroke, rect stamp, move paste) touches it.
+ * Structural changes (frame/layer add/del, resize, load) clear both stacks
+ * rather than trying to keep frame/layer indices valid across them. */
+typedef struct {
+    int frame, layer;
+    int width, height;
+    wchar_t *cells;
+    unsigned char *colors;
+} TartUndoState;
+
+#define UNDO_STACK_MAX 64
+
 typedef struct {
     int offset_x;                   /* viewport pan origin, in world coords */
     int offset_y;
@@ -313,6 +328,7 @@ typedef struct {
     char mode;              /* status-bar badge: 'n' normal, 'p' pan, 'c' command */
     bool space_held;
     bool left_click_held;   /* drives "is a draw/pan gesture active" */
+    bool stroke_open;       /* a draw/erase gesture is mid-flight; its undo snapshot is already taken */
     bool help_visible;
     bool about_visible;
 } Viewport;
@@ -342,6 +358,11 @@ typedef struct {
     bool onion;         /* ghost the previous frame under the current one */
     long play_last_ms;  /* CLOCK_MONOTONIC ms of the last playback advance */
 
+    TartUndoState undo_stack[UNDO_STACK_MAX];
+    TartUndoState redo_stack[UNDO_STACK_MAX];
+    int undo_count;
+    int redo_count;
+
     Viewport viewport;
     int running;
 } App;
@@ -356,6 +377,10 @@ bool tart_frame_add(App *app, bool dup);
 void tart_frame_del(App *app);
 bool tart_layer_add(App *app);
 void tart_layer_del(App *app);
+void tart_undo_push(App *app);
+void tart_undo(App *app);
+void tart_redo(App *app);
+void tart_undo_clear(App *app);
 void render(App *app);
 void handle_input(App *app);
 void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *anim, TartRect *status);
@@ -452,6 +477,7 @@ bool tart_frame_add(App *app, bool dup) {
     app->frames[at] = nf;
     app->frame_count++;
     app->cur_frame = at;
+    tart_undo_clear(app);
     return true;
 }
 
@@ -462,6 +488,7 @@ void tart_frame_del(App *app) {
             (size_t)(app->frame_count - app->cur_frame - 1) * sizeof(Frame));
     app->frame_count--;
     if (app->cur_frame >= app->frame_count) app->cur_frame = app->frame_count - 1;
+    tart_undo_clear(app);
 }
 
 /* Layer count is uniform across frames, so add/del touch every frame. The
@@ -485,6 +512,7 @@ bool tart_layer_add(App *app) {
     }
     app->layer_count++;
     app->cur_layer = at;
+    tart_undo_clear(app);
     return true;
 }
 
@@ -498,6 +526,89 @@ void tart_layer_del(App *app) {
     }
     app->layer_count--;
     if (app->cur_layer >= app->layer_count) app->cur_layer = app->layer_count - 1;
+    tart_undo_clear(app);
+}
+
+static void tart_undo_free_state(TartUndoState *u) {
+    free(u->cells);
+    free(u->colors);
+    u->cells = NULL;
+    u->colors = NULL;
+}
+
+static bool tart_undo_snapshot(App *app, int frame, int layer, TartUndoState *out) {
+    Canvas *c = &app->frames[frame].layers[layer];
+    size_t n = (size_t)c->width * c->height;
+    out->frame = frame;
+    out->layer = layer;
+    out->width = c->width;
+    out->height = c->height;
+    out->cells = malloc(sizeof(wchar_t) * n);
+    out->colors = malloc(n);
+    if (!out->cells || !out->colors) { tart_undo_free_state(out); return false; }
+    wmemcpy(out->cells, c->cells, n);
+    memcpy(out->colors, c->colors, n);
+    return true;
+}
+
+/* Push onto a bounded stack; when full the oldest entry falls off. */
+static void tart_undo_stack_push(TartUndoState *stack, int *count, TartUndoState s) {
+    if (*count == UNDO_STACK_MAX) {
+        tart_undo_free_state(&stack[0]);
+        memmove(&stack[0], &stack[1], (UNDO_STACK_MAX - 1) * sizeof(TartUndoState));
+        (*count)--;
+    }
+    stack[(*count)++] = s;
+}
+
+/* Call just before an edit gesture modifies the active canvas: one call =
+ * one undoable step. A fresh edit invalidates the redo stack. */
+void tart_undo_push(App *app) {
+    TartUndoState s;
+    if (!tart_undo_snapshot(app, app->cur_frame, app->cur_layer, &s)) return;
+    tart_undo_stack_push(app->undo_stack, &app->undo_count, s);
+    while (app->redo_count > 0) tart_undo_free_state(&app->redo_stack[--app->redo_count]);
+}
+
+/* Undo and redo are the same swap in opposite directions: pop a snapshot,
+ * save the canvas's present state onto the other stack, restore, and jump
+ * the editor to that frame/layer so the change is visible. */
+static void tart_undo_apply(App *app, TartUndoState *from, int *from_count,
+                            TartUndoState *to, int *to_count) {
+    if (*from_count == 0) return;
+    TartUndoState s = from[*from_count - 1];
+    /* Structure ops clear the stacks, so entries always reference a live
+     * same-sized canvas; guard anyway. */
+    if (s.frame >= app->frame_count || s.layer >= app->layer_count ||
+        s.width != app->width || s.height != app->height) {
+        tart_undo_free_state(&s);
+        (*from_count)--;
+        return;
+    }
+    TartUndoState cur;
+    if (!tart_undo_snapshot(app, s.frame, s.layer, &cur)) return;
+    tart_undo_stack_push(to, to_count, cur);
+
+    Canvas *c = &app->frames[s.frame].layers[s.layer];
+    wmemcpy(c->cells, s.cells, (size_t)s.width * s.height);
+    memcpy(c->colors, s.colors, (size_t)s.width * s.height);
+    app->cur_frame = s.frame;
+    app->cur_layer = s.layer;
+    tart_undo_free_state(&s);
+    (*from_count)--;
+}
+
+void tart_undo(App *app) {
+    tart_undo_apply(app, app->undo_stack, &app->undo_count, app->redo_stack, &app->redo_count);
+}
+
+void tart_redo(App *app) {
+    tart_undo_apply(app, app->redo_stack, &app->redo_count, app->undo_stack, &app->undo_count);
+}
+
+void tart_undo_clear(App *app) {
+    while (app->undo_count > 0) tart_undo_free_state(&app->undo_stack[--app->undo_count]);
+    while (app->redo_count > 0) tart_undo_free_state(&app->redo_stack[--app->redo_count]);
 }
 
 void init_app(App *app) {
@@ -538,6 +649,8 @@ void init_app(App *app) {
     app->fps = 8;
     app->playing = false;
     app->onion = false;
+    app->undo_count = 0;
+    app->redo_count = 0;
     init_canvas(&app->frames[0].layers[0], app->width, app->height);
 
     /* Zero is the correct default for nearly every Viewport field (TOOL_PENCIL,
@@ -565,6 +678,7 @@ void cleanup_app(App *app) {
     app->viewport.sel_buffer = NULL;
     free(app->viewport.sel_colors);
     app->viewport.sel_colors = NULL;
+    tart_undo_clear(app);
     for (int f = 0; f < app->frame_count; f++)
         for (int l = 0; l < app->layer_count; l++)
             cleanup_canvas(&app->frames[f].layers[l]);
@@ -934,7 +1048,7 @@ void render(App *app) {
         cx += (int)strlen(mode_badge) + 1;
 
         {
-            const char *tool_name = (app->viewport.tool == TOOL_PENCIL) ? "pencil" :
+            const char *tool_name = (app->viewport.tool == TOOL_PENCIL) ? "draw" :
                                      (app->viewport.tool == TOOL_ERASER) ? "eraser" :
                                      (app->viewport.tool == TOOL_RECT)   ? "rect"   :
                                      (app->viewport.tool == TOOL_SELECT) ? "select" : "move";
@@ -1113,7 +1227,7 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     attroff(A_BOLD);
 
     static const struct { int row; const char *label; TartTool tool; } tools[] = {
-        { TP_ROW_PENCIL, "Pencil", TOOL_PENCIL },
+        { TP_ROW_PENCIL, "Draw",   TOOL_PENCIL },
         { TP_ROW_ERASER, "Eraser", TOOL_ERASER },
         { TP_ROW_RECT,   "Rect",   TOOL_RECT },
         { TP_ROW_SELECT, "Select", TOOL_SELECT },
@@ -1125,14 +1239,14 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attron(a);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
         attroff(a);
-        /* Every tool binds to its label's first letter (p/e/r/s/m) - underline
+        /* Every tool binds to its label's first letter (d/e/r/s/m) - underline
          * it so that binding is visible without opening the help overlay. */
         attron(a | A_UNDERLINE);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%c", tools[i].label[0]);
         attroff(a | A_UNDERLINE);
     }
 
-    const char *header = (vp->tool == TOOL_PENCIL) ? "Pencil" :
+    const char *header = (vp->tool == TOOL_PENCIL) ? "Draw" :
                           (vp->tool == TOOL_ERASER) ? "Eraser" :
                           (vp->tool == TOOL_RECT)   ? "Rectangle" :
                           (vp->tool == TOOL_SELECT) ? "Select" : "Move";
@@ -1557,6 +1671,7 @@ bool tart_resize_doc(App *app, int new_w, int new_h) {
     }
     app->width = new_w;
     app->height = new_h;
+    tart_undo_clear(app);
     return true;
 }
 
@@ -1716,6 +1831,7 @@ bool tart_load_doc(App *app, const char *path) {
     app->height = h;
     app->fps = fps;
     app->playing = false;
+    tart_undo_clear(app);
     return true;
 }
 
@@ -1729,14 +1845,16 @@ void tart_draw_help_overlay(App *app) {
         "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
         "View    v toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
-        "Tools   p pencil   e eraser   r rect   s select   m move (underlined letter)",
+        "Tools   d draw   e eraser   r rect   s select   m move (underlined letter)",
         "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
         "        f rect fill toggle",
         "Select  drag to select (stays outlined); Move: drag to stamp a copy,",
         "        repeatable by default - c toggles cut mode (clears source, one-shot)",
         "Draw    left-click hold to use tool   space+move = alt draw/pan",
+        "Edit    u undo   U redo - one step per stroke/stamp; frame, layer,",
+        "        resize and load operations reset the history",
         "Color   [ ] cycle 8 quick colors   click Color row for full HSL picker",
-        "Anim    n/N next/prev frame   a add blank   d duplicate   D delete",
+        "Anim    n/N next/prev frame   a add blank   A duplicate   x delete",
         "        Enter play/stop   o onion skin (ghost of previous frame)   :fps N",
         "Layer   { } prev/next   Layer menu or :layer-add / :layer-del",
         "        space is transparent - lower layers show through; edits hit the",
@@ -1790,9 +1908,9 @@ void tart_draw_about_overlay(App *app) {
         "Terminal ASCII (Art) Rendering Tool  v" TART_VERSION,
         "",
         "A small, suckless-flavored TUI ASCII-art and animation editor:",
-        "pencil/eraser/rect/select/move tools, a 256-color canvas,",
+        "draw/eraser/rect/select/move tools, a 256-color canvas,",
         "stacked layers, animation frames with playback and onion skin,",
-        "resizable images, plain-text .tart save/load.",
+        "undo/redo, resizable images, plain-text .tart save/load.",
         "",
         "Built with C99 + ncursesw. No dependencies beyond that.",
         "",
