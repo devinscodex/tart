@@ -348,11 +348,11 @@ static void tart_apply_mouse(App *app, int sx, int sy,
                               bool mid_press, bool mid_release,
                               bool right_press, bool right_release,
                               bool wheel_up, bool wheel_down,
+                              bool wheel_left, bool wheel_right,
                               bool shift, bool ctrl, bool alt) {
     (void)mid_press; (void)mid_release; (void)right_press; (void)right_release;
-    (void)ctrl; (void)alt;
+    (void)ctrl;
     Viewport *vp = &app->viewport;
-    vp->mod_shift = shift;
 
     if (left_press)    vp->left_click_held = true;
     if (left_release)  vp->left_click_held = false;
@@ -481,10 +481,18 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         return;
     }
 
-    if (wheel_up || wheel_down) {
-        int delta = wheel_up ? -4 : 4;
-        if (shift) vp->offset_x += delta;
-        else vp->offset_y += delta;
+    /* Wheel pans the view. Horizontal arrives several ways, all handled:
+     * native horizontal-wheel events (SGR buttons 66/67, from a tilt wheel);
+     * Shift+wheel with the shift bit, from terminals that pass it through;
+     * and Alt+wheel - the reliable modifier, because xterm-family terminals
+     * (Windows Terminal included) reserve Shift+mouse for making a normal
+     * text selection past the app's mouse capture, and may swallow the
+     * event entirely instead of reporting it. */
+    if (wheel_up || wheel_down || wheel_left || wheel_right) {
+        if (wheel_left)       vp->offset_x -= 4;
+        else if (wheel_right) vp->offset_x += 4;
+        else if (shift || alt) vp->offset_x += wheel_up ? -4 : 4;
+        else                  vp->offset_y += wheel_up ? -4 : 4;
         return;
     }
 
@@ -499,14 +507,10 @@ static void tart_apply_mouse(App *app, int sx, int sy,
 
     int wx = (sx >= canvas_r.x) ? (sx - canvas_r.x) + vp->offset_x : -9999;
     int wy = (sy >= canvas_r.y) ? (sy - canvas_r.y) + vp->offset_y : -9999;
-    vp->mouse_world_x = wx;
-    vp->mouse_world_y = wy;
     vp->current_mouse_world_x = wx;
     vp->current_mouse_world_y = wy;
     vp->vim_cursor_x = wx;
     vp->vim_cursor_y = wy;
-    vp->cursor_doc_x = wx;
-    vp->cursor_doc_y = wy;
 
     if (left_press && sx >= tool_r.x && sx < tool_r.x + tool_r.w && sy >= tool_r.y && sy < tool_r.y + tool_r.h) {
         TartPanelRow rows[TOOL_PANEL_MAX_ROWS];
@@ -565,6 +569,7 @@ void handle_input(App *app) {
     bool sgr_mid_press = false, sgr_mid_release = false;
     bool sgr_right_press = false, sgr_right_release = false;
     bool sgr_wheel_up = false, sgr_wheel_down = false;
+    bool sgr_wheel_left = false, sgr_wheel_right = false;
     bool sgr_shift = false, sgr_ctrl = false, sgr_alt = false;
 
     if (ch == 27) {
@@ -605,8 +610,13 @@ void handle_input(App *app) {
                     sgr_alt   = (cb & 8) != 0;
                     sgr_ctrl  = (cb & 16) != 0;
                     if (cb & 64) {
-                        sgr_wheel_up = ((cb & 1) == 0);
-                        sgr_wheel_down = !sgr_wheel_up;
+                        /* Wheel events: low two bits pick the direction
+                         * (0=up 1=down 2=left 3=right). */
+                        int wheel_dir = cb & 3;
+                        sgr_wheel_up    = (wheel_dir == 0);
+                        sgr_wheel_down  = (wheel_dir == 1);
+                        sgr_wheel_left  = (wheel_dir == 2);
+                        sgr_wheel_right = (wheel_dir == 3);
                     } else {
                         /* A fresh press never carries the motion flag (bit
                          * 0x20); drag-continuation samples repeat the same
@@ -882,7 +892,7 @@ void handle_input(App *app) {
             app->viewport.offset_y = last_y - vis_h / 2;
         }
     }
-    if (ch == KEY_F(1)) {
+    if (ch == KEY_F(1) || ch == '?') {
         app->viewport.help_visible = true;
     }
     if (ch == 'p' || ch == 'P') {
@@ -1006,8 +1016,11 @@ void handle_input(App *app) {
                 sgr_mid_press, sgr_mid_release,
                 sgr_right_press, sgr_right_release,
                 sgr_wheel_up, sgr_wheel_down,
+                sgr_wheel_left, sgr_wheel_right,
                 sgr_shift, sgr_ctrl, sgr_alt);
         } else {
+            /* ncurses' mouse protocol (v1) has no horizontal-wheel buttons,
+             * so wheel left/right only ever arrive via the SGR path above. */
             MEVENT event;
             if (getmouse(&event) == OK) {
                 tart_apply_mouse(app, event.x, event.y,
@@ -1015,6 +1028,7 @@ void handle_input(App *app) {
                     (event.bstate & BUTTON2_PRESSED) != 0, (event.bstate & BUTTON2_RELEASED) != 0,
                     (event.bstate & BUTTON3_PRESSED) != 0, (event.bstate & BUTTON3_RELEASED) != 0,
                     (event.bstate & BUTTON4_PRESSED) != 0, (event.bstate & BUTTON5_PRESSED) != 0,
+                    false, false,
                     (event.bstate & BUTTON_SHIFT) != 0, (event.bstate & BUTTON_CTRL) != 0, (event.bstate & BUTTON_ALT) != 0);
             }
         }

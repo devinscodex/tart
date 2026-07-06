@@ -200,12 +200,9 @@ typedef struct {
 } Canvas;
 
 typedef struct {
-    Canvas *canvas;
     int offset_x;                   /* viewport pan origin, in world coords */
     int offset_y;
-    int cursor_doc_x;
-    int cursor_doc_y;
-    int last_mouse_screen_x;
+    int last_mouse_screen_x;        /* previous mouse position, for pan-drag deltas */
     int last_mouse_screen_y;
     int is_dragging;                /* pan mode active (toggled by 'v') */
 
@@ -262,18 +259,15 @@ typedef struct {
      * of mouse or vim-style keyboard nav moved last. */
     int current_mouse_world_x;
     int current_mouse_world_y;
-    int mouse_world_x;
-    int mouse_world_y;
     int vim_cursor_x;
     int vim_cursor_y;
 
     int command_mode;
     char command_buffer[256];
     int command_len;
-    char mode;
+    char mode;              /* status-bar badge: 'n' normal, 'p' pan, 'c' command */
     bool space_held;
     bool left_click_held;   /* drives "is a draw/pan gesture active" */
-    bool mod_shift;         /* shift+wheel = horizontal scroll */
     bool help_visible;
     bool about_visible;
 } Viewport;
@@ -350,8 +344,7 @@ void init_app(App *app) {
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
-    nodelay(stdscr, TRUE);
-    timeout(50);
+    timeout(50);        /* getch blocks at most 50ms, so the UI stays live */
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
     printf("\033[?1003h\033[?1006h");   // any-motion tracking (1003) + SGR extended encoding (1006)
     fflush(stdout);
@@ -375,68 +368,22 @@ void init_app(App *app) {
     }
 
     init_canvas(&app->canvas, TART_DEFAULT_CANVAS_WIDTH, TART_DEFAULT_CANVAS_HEIGHT);
-    app->viewport.canvas = &app->canvas;
-    app->viewport.offset_x = -2;
-    app->viewport.offset_y = -2;
-    app->viewport.cursor_doc_x = 0;
-    app->viewport.cursor_doc_y = 0;
-    app->viewport.last_mouse_screen_x = 0;
-    app->viewport.last_mouse_screen_y = 0;
-    app->viewport.is_dragging = 0;
-    app->viewport.tool = TOOL_PENCIL;
-    app->viewport.brush_char = L'#';
-    app->viewport.brush_size = 1;
-    app->viewport.brush_shape = BRUSH_SQUARE;
-    app->viewport.eraser_size = 1;
-    app->viewport.eraser_shape = BRUSH_SQUARE;
-    app->viewport.rect_filled = false;
-    app->viewport.fill_char = L'#';
-    app->viewport.palette_visible = false;
-    app->viewport.palette_target = PALETTE_TARGET_PENCIL;
-    app->viewport.palette_hover_row = 0;
-    app->viewport.palette_hover_char = 0;
-    app->viewport.tool_dragging = false;
-    app->viewport.drag_start_wx = 0;
-    app->viewport.drag_start_wy = 0;
-    app->viewport.drag_cur_wx = 0;
-    app->viewport.drag_cur_wy = 0;
-    app->viewport.has_selection = false;
-    app->viewport.sel_w = 0;
-    app->viewport.sel_h = 0;
-    app->viewport.sel_origin_wx = 0;
-    app->viewport.sel_origin_wy = 0;
-    app->viewport.sel_buffer = NULL;
-    app->viewport.sel_colors = NULL;
-    app->viewport.move_cut = false;
-    app->viewport.current_color = 0;
-    app->viewport.quick_color_idx = 0;
-    app->viewport.color_picker_visible = false;
-    app->viewport.hsl_h = 0;
-    app->viewport.hsl_s = 100;
-    app->viewport.hsl_l = 50;
-    app->viewport.color_slider_focus = 0;
-    app->viewport.open_menu = -1;
-    app->viewport.menu_hover_item = 0;
-    app->viewport.cmd_selected = 0;
-    app->viewport.cmd_scroll_off = 0;
-    app->viewport.prompt_mode = PROMPT_NONE;
-    app->viewport.prompt_len = 0;
-    memset(app->viewport.prompt_buffer, 0, sizeof(app->viewport.prompt_buffer));
-    app->viewport.current_mouse_world_x = 0;
-    app->viewport.current_mouse_world_y = 0;
-    app->viewport.mouse_world_x = 0;
-    app->viewport.mouse_world_y = 0;
-    app->viewport.vim_cursor_x = 0;
-    app->viewport.vim_cursor_y = 0;
-    app->viewport.command_mode = 0;
-    app->viewport.command_len = 0;
-    memset(app->viewport.command_buffer, 0, sizeof(app->viewport.command_buffer));
-    app->viewport.mode = 'n';
-    app->viewport.space_held = false;
-    app->viewport.left_click_held = false;
-    app->viewport.mod_shift = false;
-    app->viewport.help_visible = false;
-    app->viewport.about_visible = false;
+
+    /* Zero is the correct default for nearly every Viewport field (TOOL_PENCIL,
+     * BRUSH_SQUARE, PROMPT_NONE, ... are all 0), so clear the struct and list
+     * only the exceptions. */
+    Viewport *vp = &app->viewport;
+    memset(vp, 0, sizeof(*vp));
+    vp->offset_x = -2;      /* start panned slightly out so the canvas edge is visible */
+    vp->offset_y = -2;
+    vp->brush_char = L'#';
+    vp->brush_size = 1;
+    vp->eraser_size = 1;
+    vp->fill_char = L'#';
+    vp->hsl_s = 100;
+    vp->hsl_l = 50;
+    vp->open_menu = -1;
+    vp->mode = 'n';
     app->running = 1;
 }
 
@@ -561,21 +508,28 @@ int tart_rgb_to_256(int r, int g, int b) {
     return 16 + 36 * best_ri + 6 * best_gi + best_bi;
 }
 
-/* Draws a plain +-|  bordered box outline; caller fills the interior and
- * sets whatever color/attrs it wants around the call. Shared by every popup
+/* mvaddch only takes narrow chtypes; this is the one-cell wide-glyph
+ * equivalent, used everywhere a box-drawing or canvas character lands on
+ * screen. */
+static void tart_addwch(int y, int x, wchar_t wc) {
+    mvaddnwstr(y, x, ((wchar_t[]){ wc, L'\0' }), 1);
+}
+
+/* Draws a solid single-line box outline; caller fills the interior and sets
+ * whatever color/attrs it wants around the call. Shared by every popup
  * (help overlay, char palette, color picker) so they can't drift apart. */
 void tart_draw_box(int x, int y, int w, int h) {
-    mvaddch(y, x, '+');
-    mvaddch(y, x + w - 1, '+');
-    mvaddch(y + h - 1, x, '+');
-    mvaddch(y + h - 1, x + w - 1, '+');
+    tart_addwch(y, x, L'┌');
+    tart_addwch(y, x + w - 1, L'┐');
+    tart_addwch(y + h - 1, x, L'└');
+    tart_addwch(y + h - 1, x + w - 1, L'┘');
     for (int i = 1; i < w - 1; i++) {
-        mvaddch(y, x + i, '-');
-        mvaddch(y + h - 1, x + i, '-');
+        tart_addwch(y, x + i, L'─');
+        tart_addwch(y + h - 1, x + i, L'─');
     }
     for (int row = 1; row < h - 1; row++) {
-        mvaddch(y + row, x, '|');
-        mvaddch(y + row, x + w - 1, '|');
+        tart_addwch(y + row, x, L'│');
+        tart_addwch(y + row, x + w - 1, L'│');
     }
 }
 
@@ -604,23 +558,16 @@ void render(App *app) {
         }
     }
 
+    /* X-ruler numbers every 10 world columns; their tick marks live on the
+     * canvas's top border below (the ┬ junctions), which occupies what would
+     * otherwise be the ruler's tick row. */
     attron(COLOR_PAIR(4) | A_DIM);
-    int ruler_num_y = ruler_r.y;
-    int ruler_tick_y = ruler_r.y + 1;
-
     for (int wx = ((app->viewport.offset_x / 10) * 10) - 30; wx < app->viewport.offset_x + canvas_r.w + 30; wx += 10) {
         int screen_x = (wx - app->viewport.offset_x) + CANVAS_START_X;
         if (screen_x < CANVAS_START_X) continue;
         if (screen_x < ruler_r.w) {
-            mvprintw(ruler_num_y, screen_x, "%d", wx);
+            mvprintw(ruler_r.y, screen_x, "%d", wx);
         }
-    }
-
-    for (int i = CANVAS_START_X; i < ruler_r.w; i++) {
-        int world_x = i + app->viewport.offset_x;
-        int mod = ((world_x % 10) + 10) % 10;
-        char c = (mod == 0) ? '|' : (mod == 5 ? ',' : '.');
-        mvaddch(ruler_tick_y, i, c);
     }
     attroff(COLOR_PAIR(4) | A_DIM);
 
@@ -633,19 +580,23 @@ void render(App *app) {
     }
     attroff(COLOR_PAIR(4) | A_DIM);
 
+    /* Solid viewport frame. Top/bottom edges double as the ruler's tick row:
+     * a ┬/┴ junction every 10 world columns, aligned under the numbers above. */
     attron(COLOR_PAIR(4));
     for (int x = 0; x < canvas_r.w; x++) {
-        mvaddch(canvas_r.y - 1, canvas_r.x + x, '-');
-        mvaddch(canvas_r.y + canvas_r.h, canvas_r.x + x, '-');
+        int world_x = x + app->viewport.offset_x;
+        bool tick = (((world_x % 10) + 10) % 10) == 0;
+        tart_addwch(canvas_r.y - 1, canvas_r.x + x, tick ? L'┬' : L'─');
+        tart_addwch(canvas_r.y + canvas_r.h, canvas_r.x + x, tick ? L'┴' : L'─');
     }
     for (int y = 0; y < canvas_r.h; y++) {
-        mvaddch(canvas_r.y + y, canvas_r.x - 1, '|');
-        mvaddch(canvas_r.y + y, canvas_r.x + canvas_r.w, '|');
+        tart_addwch(canvas_r.y + y, canvas_r.x - 1, L'│');
+        tart_addwch(canvas_r.y + y, canvas_r.x + canvas_r.w, L'│');
     }
-    mvaddch(canvas_r.y - 1, canvas_r.x - 1, '+');
-    mvaddch(canvas_r.y - 1, canvas_r.x + canvas_r.w, '+');
-    mvaddch(canvas_r.y + canvas_r.h, canvas_r.x - 1, '+');
-    mvaddch(canvas_r.y + canvas_r.h, canvas_r.x + canvas_r.w, '+');
+    tart_addwch(canvas_r.y - 1, canvas_r.x - 1, L'┌');
+    tart_addwch(canvas_r.y - 1, canvas_r.x + canvas_r.w, L'┐');
+    tart_addwch(canvas_r.y + canvas_r.h, canvas_r.x - 1, L'└');
+    tart_addwch(canvas_r.y + canvas_r.h, canvas_r.x + canvas_r.w, L'┘');
     attroff(COLOR_PAIR(4));
 
     /* Pencil/eraser get a live outline of their actual size+shape footprint
@@ -713,7 +664,7 @@ void render(App *app) {
 
             if (color_pair != 0) attrs |= COLOR_PAIR(color_pair);
             attron(attrs);
-            mvaddnwstr(canvas_r.y + dy, canvas_r.x + dx, ((wchar_t[]){ch_to_draw, 0}), 1);
+            tart_addwch(canvas_r.y + dy, canvas_r.x + dx, ch_to_draw);
             attroff(attrs);
         }
     }
@@ -734,7 +685,7 @@ void render(App *app) {
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
                         wchar_t preview_ch = border ? app->viewport.brush_char : app->viewport.fill_char;
                         attron(A_DIM | COLOR_PAIR(1));
-                        mvaddnwstr(sy, sx, ((wchar_t[]){preview_ch, 0}), 1);
+                        tart_addwch(sy, sx, preview_ch);
                         attroff(A_DIM | COLOR_PAIR(1));
                     }
                 }
@@ -748,7 +699,7 @@ void render(App *app) {
                     int sy = y - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
                         attron(A_REVERSE);
-                        mvaddnwstr(sy, sx, ((wchar_t[]){tart_read_cell(app, x, y), 0}), 1);
+                        tart_addwch(sy, sx, tart_read_cell(app, x, y));
                         attroff(A_REVERSE);
                     }
                 }
@@ -762,7 +713,7 @@ void render(App *app) {
                     int sy = wy - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
                         attron(A_REVERSE | A_DIM);
-                        mvaddnwstr(sy, sx, ((wchar_t[]){app->viewport.sel_buffer[y * app->viewport.sel_w + x], 0}), 1);
+                        tart_addwch(sy, sx, app->viewport.sel_buffer[y * app->viewport.sel_w + x]);
                         attroff(A_REVERSE | A_DIM);
                     }
                 }
@@ -1213,7 +1164,7 @@ void tart_draw_palette(App *app) {
             int cx = x + 2 + PALETTE_LABEL_WIDTH + c * PALETTE_CHAR_CELL_W;
             bool hovered = (vp->palette_hover_row == i && vp->palette_hover_char == c);
             if (hovered) attron(A_REVERSE);
-            mvaddnwstr(row_y, cx, ((wchar_t[]){chars[c], 0}), 1);
+            tart_addwch(row_y, cx, chars[c]);
             if (hovered) attroff(A_REVERSE);
         }
     }
@@ -1423,7 +1374,7 @@ void tart_draw_help_overlay(App *app) {
         "",
         "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
-        "View    v toggle view/pan   wheel scroll (shift = horizontal)   Home reset",
+        "View    v toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
         "Tools   p pencil   e eraser   r rect   s select   m move (underlined letter)",
         "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
         "        f rect fill toggle",

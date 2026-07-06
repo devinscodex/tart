@@ -1,18 +1,14 @@
 CC     = clang
-CFLAGS = -std=c99 -Wall -Werror -fsanitize=address -g -Iinclude
+CFLAGS = -std=c99 -Wall -Werror -fsanitize=address -g
 LIBS   = -lncursesw -ltinfo -lm
 
 SRC    = main.c input.c
-OBJ    = $(SRC:.c=.o)
 TARGET = tart
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+$(TARGET): $(SRC) tart.h
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LIBS)
 
 clean:
 	rm -f $(TARGET)
