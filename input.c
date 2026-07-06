@@ -1,5 +1,203 @@
 #include "tart.h"
 
+static const char TART_BRUSH_CHARS[] = "#@*.o+";
+#define TART_BRUSH_CHAR_COUNT (sizeof(TART_BRUSH_CHARS) - 1)
+
+static char tart_cycle_char(char cur) {
+    for (size_t i = 0; i < TART_BRUSH_CHAR_COUNT; i++) {
+        if (TART_BRUSH_CHARS[i] == cur) return TART_BRUSH_CHARS[(i + 1) % TART_BRUSH_CHAR_COUNT];
+    }
+    return TART_BRUSH_CHARS[0];
+}
+
+static int tart_cycle_size(int size, int dir) {
+    static const int sizes[] = { 1, 3, 5 };
+    int idx = 0;
+    for (int i = 0; i < 3; i++) if (sizes[i] == size) idx = i;
+    idx += dir;
+    if (idx < 0) idx = 0;
+    if (idx > 2) idx = 2;
+    return sizes[idx];
+}
+
+static void tart_apply_panel_action(App *app, TartPanelAction action, int value) {
+    Viewport *vp = &app->viewport;
+    switch (action) {
+        case PANEL_SELECT_TOOL:
+            vp->tool = (TartTool)value;
+            break;
+        case PANEL_CHAR_CYCLE:
+            vp->brush_char = tart_cycle_char(vp->brush_char);
+            break;
+        case PANEL_SIZE_DEC:
+            if (vp->tool == TOOL_ERASER) vp->eraser_size = tart_cycle_size(vp->eraser_size, -1);
+            else vp->brush_size = tart_cycle_size(vp->brush_size, -1);
+            break;
+        case PANEL_SIZE_INC:
+            if (vp->tool == TOOL_ERASER) vp->eraser_size = tart_cycle_size(vp->eraser_size, 1);
+            else vp->brush_size = tart_cycle_size(vp->brush_size, 1);
+            break;
+        case PANEL_SHAPE_TOGGLE:
+            if (vp->tool == TOOL_ERASER) vp->eraser_shape = (vp->eraser_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
+            else vp->brush_shape = (vp->brush_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
+            break;
+        case PANEL_RECT_FILL_TOGGLE:
+            vp->rect_filled = !vp->rect_filled;
+            break;
+        default:
+            break;
+    }
+}
+
+static void tart_reset_view(App *app) {
+    Viewport *vp = &app->viewport;
+    vp->offset_x = 0;
+    vp->offset_y = 0;
+    vp->current_mouse_world_x = 0;
+    vp->current_mouse_world_y = 0;
+    vp->vim_cursor_x = 0;
+    vp->vim_cursor_y = 0;
+}
+
+static void tart_toggle_pan(App *app) {
+    Viewport *vp = &app->viewport;
+    vp->is_dragging = !vp->is_dragging;
+    vp->mode = vp->is_dragging ? 'p' : 'n';
+}
+
+static void tart_deselect(App *app) {
+    Viewport *vp = &app->viewport;
+    free(vp->sel_buffer);
+    vp->sel_buffer = NULL;
+    vp->sel_w = 0;
+    vp->sel_h = 0;
+    vp->has_selection = false;
+}
+
+static void tart_execute_command(App *app, const char *name) {
+    if (strcmp(name, "quit") == 0) {
+        app->running = 0;
+    } else if (strcmp(name, "help") == 0) {
+        app->viewport.help_visible = true;
+    } else if (strcmp(name, "deselect") == 0) {
+        tart_deselect(app);
+    } else if (strcmp(name, "reset-view") == 0) {
+        tart_reset_view(app);
+    } else if (strcmp(name, "toggle-pan") == 0) {
+        tart_toggle_pan(app);
+    }
+}
+
+static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_release) {
+    Viewport *vp = &app->viewport;
+    if (left_press) {
+        vp->tool_dragging = true;
+        vp->drag_start_wx = wx;
+        vp->drag_start_wy = wy;
+    }
+    if (vp->tool_dragging) {
+        vp->drag_cur_wx = wx;
+        vp->drag_cur_wy = wy;
+    }
+    if (left_release && vp->tool_dragging) {
+        int x0 = vp->drag_start_wx, x1 = wx;
+        int y0 = vp->drag_start_wy, y1 = wy;
+        if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+        if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+        for (int y = y0; y <= y1; y++) {
+            for (int x = x0; x <= x1; x++) {
+                bool border = (x == x0 || x == x1 || y == y0 || y == y1);
+                if (border || vp->rect_filled) tart_draw_at(app, x, y, vp->brush_char);
+            }
+        }
+        vp->tool_dragging = false;
+    }
+}
+
+static void tart_tool_select(App *app, int wx, int wy, bool left_press, bool left_release) {
+    Viewport *vp = &app->viewport;
+    if (left_press) {
+        vp->tool_dragging = true;
+        vp->drag_start_wx = wx;
+        vp->drag_start_wy = wy;
+    }
+    if (vp->tool_dragging) {
+        vp->drag_cur_wx = wx;
+        vp->drag_cur_wy = wy;
+    }
+    if (left_release && vp->tool_dragging) {
+        int x0 = vp->drag_start_wx, x1 = wx;
+        int y0 = vp->drag_start_wy, y1 = wy;
+        if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+        if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+        int w = x1 - x0 + 1, h = y1 - y0 + 1;
+
+        free(vp->sel_buffer);
+        vp->sel_buffer = malloc((size_t)w * h);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                vp->sel_buffer[y * w + x] = tart_read_cell(app, x0 + x, y0 + y);
+            }
+        }
+        vp->sel_w = w;
+        vp->sel_h = h;
+        vp->has_selection = true;
+        vp->tool_dragging = false;
+    }
+}
+
+static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_release) {
+    Viewport *vp = &app->viewport;
+    if (left_press && vp->has_selection) {
+        vp->tool_dragging = true;
+    }
+    if (vp->tool_dragging) {
+        vp->drag_cur_wx = wx;
+        vp->drag_cur_wy = wy;
+    }
+    if (left_release && vp->tool_dragging) {
+        for (int y = 0; y < vp->sel_h; y++) {
+            for (int x = 0; x < vp->sel_w; x++) {
+                tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
+            }
+        }
+        vp->tool_dragging = false;
+    }
+}
+
+/* Returns true if the click was consumed by the menu bar / an open dropdown,
+ * meaning the rest of tart_apply_mouse should not also treat it as a canvas
+ * or tool-panel interaction. */
+static bool tart_handle_menu_click(App *app, int sx, int sy, TartRect menu_r) {
+    Viewport *vp = &app->viewport;
+    TartMenuBarItem mitems[TART_MENU_COUNT];
+    tart_build_menu_bar(app, mitems);
+
+    if (sy == menu_r.y) {
+        for (size_t i = 0; i < TART_MENU_COUNT; i++) {
+            if (sx >= mitems[i].x0 && sx <= mitems[i].x1) {
+                vp->open_menu = (vp->open_menu == (int)i) ? -1 : (int)i;
+                vp->menu_hover_item = 0;
+                return true;
+            }
+        }
+    }
+
+    if (vp->open_menu >= 0) {
+        const TartMenuDef *menu = &TART_MENUS[vp->open_menu];
+        int box_y0 = menu_r.y + 1;
+        int box_x0 = mitems[vp->open_menu].x0;
+        if (sy >= box_y0 && sy < box_y0 + menu->item_count && sx >= box_x0) {
+            int item_idx = sy - box_y0;
+            tart_execute_command(app, menu->items[item_idx]);
+        }
+        vp->open_menu = -1;
+        return true;
+    }
+
+    return false;
+}
+
 static void tart_apply_mouse(App *app, int sx, int sy,
                               bool left_press, bool left_release,
                               bool mid_press, bool mid_release,
@@ -28,6 +226,12 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
     tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
 
+    if (left_press && tart_handle_menu_click(app, sx, sy, menu_r)) {
+        vp->last_mouse_screen_x = sx;
+        vp->last_mouse_screen_y = sy;
+        return;
+    }
+
     int wx = (sx >= canvas_r.x) ? (sx - canvas_r.x) + vp->offset_x : -9999;
     int wy = (sy >= canvas_r.y) ? (sy - canvas_r.y) + vp->offset_y : -9999;
     vp->mouse_world_x = wx;
@@ -40,18 +244,44 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     vp->cursor_doc_y = wy;
 
     if (left_press && sx >= tool_r.x && sx < tool_r.x + tool_r.w && sy >= tool_r.y && sy < tool_r.y + tool_r.h) {
-        if (sy == tool_r.y + 3) vp->current_brush = '#';
-        else if (sy == tool_r.y + 4) vp->current_brush = ' ';
+        TartPanelRow rows[TOOL_PANEL_MAX_ROWS];
+        int n = tart_build_tool_panel(app, rows);
+        int rel_row = sy - tool_r.y;
+        int rel_x = sx - tool_r.x;
+        for (int i = 0; i < n; i++) {
+            if (rows[i].row != rel_row) continue;
+            if (rows[i].x0 != -1 && (rel_x < rows[i].x0 || rel_x > rows[i].x1)) continue;
+            tart_apply_panel_action(app, rows[i].action, rows[i].value);
+            break;
+        }
     }
 
     bool first_event = (vp->last_mouse_screen_x == 0 && vp->last_mouse_screen_y == 0);
-    bool acting = vp->left_click_held || vp->space_held;
 
-    if (acting && !vp->is_dragging) {
-        if (wx >= 0 && wy >= 0) tart_draw_at(app, wx, wy, vp->current_brush);
-    } else if ((acting || vp->is_dragging) && !first_event) {
-        vp->offset_x -= (sx - vp->last_mouse_screen_x);
-        vp->offset_y -= (sy - vp->last_mouse_screen_y);
+    if (vp->is_dragging) {
+        if (!first_event) {
+            vp->offset_x -= (sx - vp->last_mouse_screen_x);
+            vp->offset_y -= (sy - vp->last_mouse_screen_y);
+        }
+    } else {
+        bool acting = vp->left_click_held || vp->space_held;
+        switch (vp->tool) {
+            case TOOL_PENCIL:
+                if (acting) tart_stamp(app, wx, wy, vp->brush_size, vp->brush_shape, vp->brush_char);
+                break;
+            case TOOL_ERASER:
+                if (acting) tart_stamp(app, wx, wy, vp->eraser_size, vp->eraser_shape, ' ');
+                break;
+            case TOOL_RECT:
+                tart_tool_rect(app, wx, wy, left_press, left_release);
+                break;
+            case TOOL_SELECT:
+                tart_tool_select(app, wx, wy, left_press, left_release);
+                break;
+            case TOOL_MOVE:
+                tart_tool_move(app, wx, wy, left_press, left_release);
+                break;
+        }
     }
 
     vp->last_mouse_screen_x = sx;
@@ -113,12 +343,20 @@ void handle_input(App *app) {
                         sgr_wheel_up = ((cb & 1) == 0);
                         sgr_wheel_down = !sgr_wheel_up;
                     } else {
+                        /* A fresh press never carries the motion flag (bit
+                         * 0x20); drag-continuation samples repeat the same
+                         * button number WITH it set. Without this check,
+                         * every motion sample during a drag would look like
+                         * a brand-new press, which re-arms drag-start state
+                         * (rect/select) on every intermediate sample instead
+                         * of only at the real press. */
+                        bool motion = (cb & 32) != 0;
                         int btn = cb & 3;
-                        sgr_left_press    = (!released && btn == 0);
+                        sgr_left_press    = (!released && !motion && btn == 0);
                         sgr_left_release  = (released && btn == 0);
-                        sgr_mid_press     = (!released && btn == 1);
+                        sgr_mid_press     = (!released && !motion && btn == 1);
                         sgr_mid_release   = (released && btn == 1);
-                        sgr_right_press   = (!released && btn == 2);
+                        sgr_right_press   = (!released && !motion && btn == 2);
                         sgr_right_release = (released && btn == 2);
                     }
                     have_sgr_mouse = true;
@@ -166,13 +404,7 @@ void handle_input(App *app) {
                 if (matches == 1) resolved = candidate;
             }
 
-            if (resolved) {
-                if (strcmp(resolved, "quit") == 0) {
-                    app->running = 0;
-                } else if (strcmp(resolved, "help") == 0) {
-                    app->viewport.help_visible = true;
-                }
-            }
+            if (resolved) tart_execute_command(app, resolved);
 
             app->viewport.command_mode = 0;
             app->viewport.mode = 'n';
@@ -188,6 +420,21 @@ void handle_input(App *app) {
         } else if (ch >= 32 && ch < 127 && app->viewport.command_len < 255) {
             app->viewport.command_buffer[app->viewport.command_len++] = ch;
             app->viewport.command_buffer[app->viewport.command_len] = '\0';
+        }
+        return;
+    }
+
+    if (app->viewport.open_menu >= 0 && ch != KEY_MOUSE) {
+        int n = TART_MENUS[app->viewport.open_menu].item_count;
+        if (ch == 27) {
+            app->viewport.open_menu = -1;
+        } else if (ch == KEY_UP) {
+            app->viewport.menu_hover_item = (app->viewport.menu_hover_item - 1 + n) % n;
+        } else if (ch == KEY_DOWN) {
+            app->viewport.menu_hover_item = (app->viewport.menu_hover_item + 1) % n;
+        } else if (ch == '\n' || ch == KEY_ENTER) {
+            tart_execute_command(app, TART_MENUS[app->viewport.open_menu].items[app->viewport.menu_hover_item]);
+            app->viewport.open_menu = -1;
         }
         return;
     }
@@ -211,12 +458,7 @@ void handle_input(App *app) {
         app->viewport.space_held = false;
     }
     if (ch == KEY_HOME) {
-        app->viewport.offset_x = 0;
-        app->viewport.offset_y = 0;
-        app->viewport.current_mouse_world_x = 0;
-        app->viewport.current_mouse_world_y = 0;
-        app->viewport.vim_cursor_x = 0;
-        app->viewport.vim_cursor_y = 0;
+        tart_reset_view(app);
     }
     if (ch == KEY_END) {
         int last_x = app->canvas.width - 1;
@@ -238,15 +480,38 @@ void handle_input(App *app) {
     if (ch == KEY_F(1)) {
         app->viewport.help_visible = true;
     }
-    if (ch == 'e' || ch == 'E') {
-        app->viewport.current_brush = ' ';
-    }
     if (ch == 'p' || ch == 'P') {
-        app->viewport.current_brush = '#';
+        app->viewport.tool = TOOL_PENCIL;
+    }
+    if (ch == 'e' || ch == 'E') {
+        app->viewport.tool = TOOL_ERASER;
+    }
+    if (ch == 'r') {
+        app->viewport.tool = TOOL_RECT;
+    }
+    if (ch == 's') {
+        app->viewport.tool = TOOL_SELECT;
+    }
+    if (ch == 'm') {
+        app->viewport.tool = TOOL_MOVE;
+    }
+    if (ch == 't') {
+        tart_apply_panel_action(app, PANEL_CHAR_CYCLE, 0);
+    }
+    if (ch == '[') {
+        tart_apply_panel_action(app, PANEL_SIZE_DEC, 0);
+    }
+    if (ch == ']') {
+        tart_apply_panel_action(app, PANEL_SIZE_INC, 0);
+    }
+    if (ch == 9) {
+        tart_apply_panel_action(app, PANEL_SHAPE_TOGGLE, 0);
+    }
+    if (ch == 'f' && app->viewport.tool == TOOL_RECT) {
+        tart_apply_panel_action(app, PANEL_RECT_FILL_TOGGLE, 0);
     }
     if (ch == 'v' || ch == 'V') {
-        app->viewport.is_dragging = !app->viewport.is_dragging;
-        app->viewport.mode = app->viewport.is_dragging ? 'p' : 'n';
+        tart_toggle_pan(app);
     }
     if (ch == 'h') {
         app->viewport.vim_cursor_x--;

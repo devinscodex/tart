@@ -15,7 +15,7 @@
 #define TART_DEFAULT_CANVAS_HEIGHT 30
 #endif
 
-#define TOOL_PANEL_WIDTH 10
+#define TOOL_PANEL_WIDTH 18
 #define Y_RULER_WIDTH 5
 #define CANVAS_START_X (TOOL_PANEL_WIDTH + Y_RULER_WIDTH)
 
@@ -32,8 +32,67 @@ typedef struct {
 static const TartCommand TART_COMMANDS[] = {
     { "quit", "q",     "Quit TART" },
     { "help", "binds", "Show keybindings" },
+    { "deselect", NULL, "Clear current selection" },
+    { "reset-view", NULL, "Reset pan offset to origin" },
+    { "toggle-pan", NULL, "Toggle pan/normal mode" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
+
+typedef struct {
+    const char *label;
+    const char *items[3];
+    int item_count;
+} TartMenuDef;
+
+static const TartMenuDef TART_MENUS[] = {
+    { "File", { "quit" },                 1 },
+    { "Edit", { "deselect" },              1 },
+    { "View", { "reset-view", "toggle-pan" }, 2 },
+    { "Help", { "help" },                  1 },
+};
+#define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
+
+typedef struct {
+    const char *label;
+    int x0, x1;
+} TartMenuBarItem;
+
+typedef enum { TOOL_PENCIL, TOOL_ERASER, TOOL_RECT, TOOL_SELECT, TOOL_MOVE } TartTool;
+typedef enum { BRUSH_SQUARE, BRUSH_ROUND } BrushShape;
+
+typedef enum {
+    PANEL_NONE,
+    PANEL_SELECT_TOOL,
+    PANEL_CHAR_CYCLE,
+    PANEL_SIZE_DEC,
+    PANEL_SIZE_INC,
+    PANEL_SHAPE_TOGGLE,
+    PANEL_RECT_FILL_TOGGLE,
+} TartPanelAction;
+
+typedef struct {
+    int row;            /* y offset from tool_r.y */
+    int x0, x1;         /* x offset range from tool_r.x, inclusive; -1,-1 = whole row */
+    TartPanelAction action;
+    int value;          /* payload, e.g. TartTool for PANEL_SELECT_TOOL */
+} TartPanelRow;
+
+#define TOOL_PANEL_MAX_ROWS 16
+
+/* Row layout shared by the tool-panel renderer and its click hit-test, so
+ * they can never drift out of sync with each other. */
+#define TP_ROW_TOOLS_HEADER   1
+#define TP_ROW_PENCIL         3
+#define TP_ROW_ERASER         4
+#define TP_ROW_RECT           5
+#define TP_ROW_SELECT         6
+#define TP_ROW_MOVE           7
+#define TP_ROW_OPTIONS_HEADER 9
+#define TP_ROW_OPT1           10
+#define TP_ROW_OPT2           11
+#define TP_ROW_OPT3           12
+#define TP_SIZE_DEC_X         9
+#define TP_SIZE_INC_X         12
 
 typedef struct {
     int width;
@@ -50,7 +109,21 @@ typedef struct {
     int last_mouse_screen_x;
     int last_mouse_screen_y;
     int is_dragging;
-    char current_brush;
+    TartTool tool;
+    char brush_char;
+    int brush_size;
+    BrushShape brush_shape;
+    int eraser_size;
+    BrushShape eraser_shape;
+    bool rect_filled;
+    bool tool_dragging;
+    int drag_start_wx, drag_start_wy;
+    int drag_cur_wx, drag_cur_wy;
+    bool has_selection;
+    int sel_w, sel_h;
+    char *sel_buffer;
+    int open_menu;
+    int menu_hover_item;
     int current_mouse_world_x;
     int current_mouse_world_y;
     int mouse_world_x;
@@ -92,6 +165,12 @@ void render(App *app);
 void handle_input(App *app);
 void tart_compute_layout(App *app, TartRect *menu, TartRect *ruler, TartRect *tool, TartRect *y_ruler, TartRect *canvas, TartRect *status);
 void tart_draw_at(App *app, int world_x, int world_y, char ch);
+void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, char ch);
+char tart_read_cell(App *app, int x, int y);
+int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]);
+int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]);
+void tart_draw_tool_panel(App *app, TartRect tool_r);
+void tart_draw_menu_dropdown(App *app, TartRect menu_r);
 void tart_draw_command_palette(App *app, TartRect status);
 void tart_draw_help_overlay(App *app);
 
@@ -136,7 +215,24 @@ void init_app(App *app) {
     app->viewport.last_mouse_screen_x = 0;
     app->viewport.last_mouse_screen_y = 0;
     app->viewport.is_dragging = 0;
-    app->viewport.current_brush = '#';
+    app->viewport.tool = TOOL_PENCIL;
+    app->viewport.brush_char = '#';
+    app->viewport.brush_size = 1;
+    app->viewport.brush_shape = BRUSH_SQUARE;
+    app->viewport.eraser_size = 1;
+    app->viewport.eraser_shape = BRUSH_SQUARE;
+    app->viewport.rect_filled = false;
+    app->viewport.tool_dragging = false;
+    app->viewport.drag_start_wx = 0;
+    app->viewport.drag_start_wy = 0;
+    app->viewport.drag_cur_wx = 0;
+    app->viewport.drag_cur_wy = 0;
+    app->viewport.has_selection = false;
+    app->viewport.sel_w = 0;
+    app->viewport.sel_h = 0;
+    app->viewport.sel_buffer = NULL;
+    app->viewport.open_menu = -1;
+    app->viewport.menu_hover_item = 0;
     app->viewport.current_mouse_world_x = 0;
     app->viewport.current_mouse_world_y = 0;
     app->viewport.mouse_world_x = 0;
@@ -161,6 +257,8 @@ void init_app(App *app) {
 void cleanup_app(App *app) {
     printf("\033[?1006l\033[?1003l");   // disable SGR encoding + any-motion tracking
     fflush(stdout);
+    free(app->viewport.sel_buffer);
+    app->viewport.sel_buffer = NULL;
     cleanup_canvas(&app->canvas);
     endwin();
 }
@@ -182,6 +280,23 @@ void tart_draw_at(App *app, int world_x, int world_y, char ch) {
     }
 }
 
+char tart_read_cell(App *app, int x, int y) {
+    if (x >= 0 && x < app->canvas.width && y >= 0 && y < app->canvas.height) {
+        return app->canvas.cells[y * app->canvas.width + x];
+    }
+    return ' ';
+}
+
+void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, char ch) {
+    int r = (size - 1) / 2;
+    for (int dy = -r; dy <= r; dy++) {
+        for (int dx = -r; dx <= r; dx++) {
+            if (shape == BRUSH_ROUND && (dx * dx + dy * dy) > r * r) continue;
+            tart_draw_at(app, cx + dx, cy + dy, ch);
+        }
+    }
+}
+
 void render(App *app) {
     erase();
 
@@ -189,8 +304,19 @@ void render(App *app) {
     tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
 
     attron(COLOR_PAIR(3) | A_REVERSE);
-    mvprintw(menu_r.y, menu_r.x, "%-*s", menu_r.w, " File  Edit  View  Layer  Window  Help");
+    mvprintw(menu_r.y, menu_r.x, "%-*s", menu_r.w, "");
     attroff(COLOR_PAIR(3) | A_REVERSE);
+    {
+        TartMenuBarItem mitems[TART_MENU_COUNT];
+        tart_build_menu_bar(app, mitems);
+        for (size_t i = 0; i < TART_MENU_COUNT; i++) {
+            bool open = (app->viewport.open_menu == (int)i);
+            attr_t a = COLOR_PAIR(3) | A_REVERSE | (open ? A_BOLD : A_NORMAL);
+            attron(a);
+            mvprintw(menu_r.y, mitems[i].x0, "%s", mitems[i].label);
+            attroff(a);
+        }
+    }
 
     attron(COLOR_PAIR(4) | A_DIM);
     int ruler_num_y = ruler_r.y;
@@ -212,13 +338,7 @@ void render(App *app) {
     }
     attroff(COLOR_PAIR(4) | A_DIM);
 
-    attron(A_BOLD);
-    mvprintw(tool_r.y + 1, tool_r.x + 1, "Tools");
-    mvprintw(tool_r.y + 3, tool_r.x + 1, "Pencil");
-    mvprintw(tool_r.y + 4, tool_r.x + 1, "Eraser");
-    mvprintw(tool_r.y + 6, tool_r.x + 1, "Brush:");
-    mvprintw(tool_r.y + 7, tool_r.x + 1, "  '%c'", app->viewport.current_brush);
-    attroff(A_BOLD);
+    tart_draw_tool_panel(app, tool_r);
 
     attron(COLOR_PAIR(4) | A_DIM);
     for (int y = 0; y < y_ruler_r.h; y++) {
@@ -266,6 +386,57 @@ void render(App *app) {
         }
     }
 
+    if (app->viewport.tool_dragging) {
+        int x0 = app->viewport.drag_start_wx, x1 = app->viewport.drag_cur_wx;
+        int y0 = app->viewport.drag_start_wy, y1 = app->viewport.drag_cur_wy;
+        if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+        if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+
+        if (app->viewport.tool == TOOL_RECT) {
+            for (int y = y0; y <= y1; y++) {
+                for (int x = x0; x <= x1; x++) {
+                    bool border = (x == x0 || x == x1 || y == y0 || y == y1);
+                    if (!border && !app->viewport.rect_filled) continue;
+                    int sx = x - app->viewport.offset_x + canvas_r.x;
+                    int sy = y - app->viewport.offset_y + canvas_r.y;
+                    if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
+                        attron(A_DIM | COLOR_PAIR(1));
+                        mvaddch(sy, sx, app->viewport.brush_char);
+                        attroff(A_DIM | COLOR_PAIR(1));
+                    }
+                }
+            }
+        } else if (app->viewport.tool == TOOL_SELECT) {
+            for (int y = y0; y <= y1; y++) {
+                for (int x = x0; x <= x1; x++) {
+                    bool border = (x == x0 || x == x1 || y == y0 || y == y1);
+                    if (!border) continue;
+                    int sx = x - app->viewport.offset_x + canvas_r.x;
+                    int sy = y - app->viewport.offset_y + canvas_r.y;
+                    if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
+                        attron(A_REVERSE);
+                        mvaddch(sy, sx, tart_read_cell(app, x, y));
+                        attroff(A_REVERSE);
+                    }
+                }
+            }
+        } else if (app->viewport.tool == TOOL_MOVE && app->viewport.has_selection) {
+            for (int y = 0; y < app->viewport.sel_h; y++) {
+                for (int x = 0; x < app->viewport.sel_w; x++) {
+                    int wx = app->viewport.drag_cur_wx + x;
+                    int wy = app->viewport.drag_cur_wy + y;
+                    int sx = wx - app->viewport.offset_x + canvas_r.x;
+                    int sy = wy - app->viewport.offset_y + canvas_r.y;
+                    if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
+                        attron(A_REVERSE | A_DIM);
+                        mvaddch(sy, sx, app->viewport.sel_buffer[y * app->viewport.sel_w + x]);
+                        attroff(A_REVERSE | A_DIM);
+                    }
+                }
+            }
+        }
+    }
+
     if (app->viewport.command_mode) {
         tart_draw_command_palette(app, status_r);
     } else {
@@ -279,10 +450,21 @@ void render(App *app) {
         attroff(COLOR_PAIR(3) | A_BOLD);
         cx += (int)strlen(mode_badge) + 1;
 
-        attron(COLOR_PAIR(2));
-        mvprintw(status_r.y, cx, "brush '%c'", app->viewport.current_brush);
-        attroff(COLOR_PAIR(2));
-        cx += (int)strlen("brush 'X'") + 1;
+        {
+            const char *tool_name = (app->viewport.tool == TOOL_PENCIL) ? "pencil" :
+                                     (app->viewport.tool == TOOL_ERASER) ? "eraser" :
+                                     (app->viewport.tool == TOOL_RECT)   ? "rect"   :
+                                     (app->viewport.tool == TOOL_SELECT) ? "select" : "move";
+            attron(COLOR_PAIR(2));
+            if (app->viewport.tool == TOOL_PENCIL) {
+                mvprintw(status_r.y, cx, "tool:%s '%c'", tool_name, app->viewport.brush_char);
+                cx += (int)strlen("tool:") + (int)strlen(tool_name) + 5;
+            } else {
+                mvprintw(status_r.y, cx, "tool:%s", tool_name);
+                cx += (int)strlen("tool:") + (int)strlen(tool_name) + 1;
+            }
+            attroff(COLOR_PAIR(2));
+        }
 
         attron(COLOR_PAIR(4) | A_DIM);
         mvprintw(status_r.y, cx, "mouse[%4d,%4d]", app->viewport.mouse_world_x, app->viewport.mouse_world_y);
@@ -339,11 +521,134 @@ void render(App *app) {
         }
     }
 
+    if (app->viewport.open_menu >= 0) {
+        tart_draw_menu_dropdown(app, menu_r);
+    }
+
     if (app->viewport.help_visible) {
         tart_draw_help_overlay(app);
     }
 
     refresh();
+}
+
+static const TartCommand *tart_find_command(const char *name) {
+    for (size_t i = 0; i < TART_COMMAND_COUNT; i++) {
+        if (strcmp(TART_COMMANDS[i].name, name) == 0) return &TART_COMMANDS[i];
+    }
+    return NULL;
+}
+
+int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
+    Viewport *vp = &app->viewport;
+    int n = 0;
+
+    rows[n++] = (TartPanelRow){ TP_ROW_PENCIL, -1, -1, PANEL_SELECT_TOOL, TOOL_PENCIL };
+    rows[n++] = (TartPanelRow){ TP_ROW_ERASER, -1, -1, PANEL_SELECT_TOOL, TOOL_ERASER };
+    rows[n++] = (TartPanelRow){ TP_ROW_RECT,   -1, -1, PANEL_SELECT_TOOL, TOOL_RECT };
+    rows[n++] = (TartPanelRow){ TP_ROW_SELECT, -1, -1, PANEL_SELECT_TOOL, TOOL_SELECT };
+    rows[n++] = (TartPanelRow){ TP_ROW_MOVE,   -1, -1, PANEL_SELECT_TOOL, TOOL_MOVE };
+
+    if (vp->tool == TOOL_PENCIL) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_CHAR_CYCLE, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_DEC_X, TP_SIZE_DEC_X, PANEL_SIZE_DEC, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_INC_X, TP_SIZE_INC_X, PANEL_SIZE_INC, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
+    } else if (vp->tool == TOOL_ERASER) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, TP_SIZE_DEC_X, TP_SIZE_DEC_X, PANEL_SIZE_DEC, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, TP_SIZE_INC_X, TP_SIZE_INC_X, PANEL_SIZE_INC, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
+    } else if (vp->tool == TOOL_RECT) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_RECT_FILL_TOGGLE, 0 };
+    }
+    return n;
+}
+
+void tart_draw_tool_panel(App *app, TartRect tool_r) {
+    Viewport *vp = &app->viewport;
+
+    attron(A_BOLD);
+    mvprintw(tool_r.y + TP_ROW_TOOLS_HEADER, tool_r.x + 1, "Tools");
+    attroff(A_BOLD);
+
+    static const struct { int row; const char *label; TartTool tool; } tools[] = {
+        { TP_ROW_PENCIL, "Pencil", TOOL_PENCIL },
+        { TP_ROW_ERASER, "Eraser", TOOL_ERASER },
+        { TP_ROW_RECT,   "Rect",   TOOL_RECT },
+        { TP_ROW_SELECT, "Select", TOOL_SELECT },
+        { TP_ROW_MOVE,   "Move",   TOOL_MOVE },
+    };
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
+        bool sel = (vp->tool == tools[i].tool);
+        if (sel) attron(A_REVERSE | A_BOLD);
+        mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
+        if (sel) attroff(A_REVERSE | A_BOLD);
+    }
+
+    const char *header = (vp->tool == TOOL_PENCIL) ? "Pencil" :
+                          (vp->tool == TOOL_ERASER) ? "Eraser" :
+                          (vp->tool == TOOL_RECT)   ? "Rectangle" :
+                          (vp->tool == TOOL_SELECT) ? "Select" : "Move";
+    attron(A_BOLD | COLOR_PAIR(1));
+    mvprintw(tool_r.y + TP_ROW_OPTIONS_HEADER, tool_r.x + 1, "%s", header);
+    attroff(A_BOLD | COLOR_PAIR(1));
+
+    if (vp->tool == TOOL_PENCIL) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Char: '%c'", vp->brush_char);
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Size:%d  -  +", vp->brush_size);
+        mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Shape: %s", vp->brush_shape == BRUSH_ROUND ? "round" : "square");
+    } else if (vp->tool == TOOL_ERASER) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Size:%d  -  +", vp->eraser_size);
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Shape: %s", vp->eraser_shape == BRUSH_ROUND ? "round" : "square");
+    } else if (vp->tool == TOOL_RECT) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (f)", vp->rect_filled ? "on" : "off");
+    } else if (vp->tool == TOOL_SELECT) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag to select");
+    } else if (vp->tool == TOOL_MOVE) {
+        if (vp->has_selection) mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Buf: %dx%d", vp->sel_w, vp->sel_h);
+        else mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "(no selection)");
+    }
+}
+
+int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]) {
+    (void)app;
+    int x = 1;
+    for (size_t i = 0; i < TART_MENU_COUNT; i++) {
+        items[i].label = TART_MENUS[i].label;
+        items[i].x0 = x;
+        items[i].x1 = x + (int)strlen(TART_MENUS[i].label) - 1;
+        x = items[i].x1 + 3;
+    }
+    return TART_MENU_COUNT;
+}
+
+void tart_draw_menu_dropdown(App *app, TartRect menu_r) {
+    Viewport *vp = &app->viewport;
+    if (vp->open_menu < 0) return;
+
+    TartMenuBarItem mitems[TART_MENU_COUNT];
+    tart_build_menu_bar(app, mitems);
+    const TartMenuDef *menu = &TART_MENUS[vp->open_menu];
+
+    int w = 6;
+    for (int i = 0; i < menu->item_count; i++) {
+        const TartCommand *c = tart_find_command(menu->items[i]);
+        int l = (c ? (int)strlen(c->desc) : (int)strlen(menu->items[i])) + 3;
+        if (l > w) w = l;
+    }
+    int x = mitems[vp->open_menu].x0;
+    int y = menu_r.y + 1;
+
+    attron(COLOR_PAIR(2));
+    for (int i = 0; i < menu->item_count; i++) {
+        const TartCommand *c = tart_find_command(menu->items[i]);
+        const char *label = c ? c->desc : menu->items[i];
+        mvprintw(y + i, x, "%*s", w, "");
+        if (i == vp->menu_hover_item) attron(A_REVERSE);
+        mvprintw(y + i, x, " %-*s", w - 1, label);
+        if (i == vp->menu_hover_item) attroff(A_REVERSE);
+    }
+    attroff(COLOR_PAIR(2));
 }
 
 void tart_draw_command_palette(App *app, TartRect status_r) {
@@ -393,9 +698,12 @@ void tart_draw_help_overlay(App *app) {
         "",
         "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
-        "View    v toggle view/pan   wheel scroll   Home reset   End jump to content",
-        "Draw    left-click hold = pencil   space+move = alt draw/pan   p/e pencil/eraser",
-        "Cmd     : open command palette (quit, help)",
+        "View    v toggle view/pan   wheel scroll (shift = horizontal)   Home reset",
+        "Tools   p pencil   e eraser   r rect   s select   m move",
+        "Brush   t cycle tip char   [ ] size   Tab shape   f rect fill toggle",
+        "Draw    left-click hold to use tool   space+move = alt draw/pan",
+        "Menu    click File/Edit/View/Help, or arrows+Enter, Esc closes",
+        "Cmd     : open command palette (quit, help, deselect, reset-view, toggle-pan)",
         "",
         "Press any key to close",
     };
