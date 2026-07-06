@@ -1,79 +1,179 @@
 #include "tart.h"
 
-void show_help() {
-    clear();
-    printw("TART - Terminal ASCII Rendering Tool (+ VIM learning)\n\n");
-    printw("MODE: n=normal | c=command | p=pan\n\n");
-    printw("VIM motions (cursor highlight + auto follow, can roam workspace):\n");
-    printw("  h j k l     Move cursor highlight one cell\n");
-    printw("  w / b       Move cursor highlight +5 / -5 horizontally\n");
-    printw("  0 / $       Cursor to start / end of line\n");
-    printw("  G / g       Cursor to bottom / top of canvas\n");
-    printw("  Ctrl+d / Ctrl+u   Pan view down / up half page\n");
-    printw("  PageUp / PageDn   Pan view full page\n");
-    printw("\nView & Pan:\n");
-    printw("  Arrows        Pan viewport (single step)\n");
-    printw("  Space + Left hold & drag   Pan until mouse release\n");
-    printw("  Wheel         Vertical pan (Shift+Wheel = horizontal)\n");
-    printw("  Home          Reset view to (0,0) + padding\n");
-    printw("  End           Bottom-right corner of canvas\n");
-    printw("  Ctrl+Home     Exact workspace origin\n");
-    printw("  Ctrl+End      Far bottom-right of workspace\n");
-    printw("\nDraw & Tools:\n");
-    printw("  Left click/drag   Draw continuous line (pencil/eraser)\n");
-    printw("  p / e             Pencil / Eraser\n");
-    printw("\nOther:\n");
-    printw("  Ctrl+E        Enter command mode (type q / help / binds)\n");
-    printw("  F1            This help screen\n");
-    printw("  q             Quit\n\n");
-    printw("Active mouse tracking: Mouse[] shows live mouse world position (canvas 0,0) on movement.\n");
-    printw("Dead space: simple grid fills all area outside canvas.\n");
-    printw("Press any key (keyboard only) to close...");
-    refresh();
-    int c;
-    do {
-        c = getch();
-    } while (c == KEY_MOUSE);
+static void tart_apply_mouse(App *app, int sx, int sy,
+                              bool left_press, bool left_release,
+                              bool mid_press, bool mid_release,
+                              bool right_press, bool right_release,
+                              bool wheel_up, bool wheel_down,
+                              bool shift, bool ctrl, bool alt) {
+    Viewport *vp = &app->viewport;
+    vp->mod_shift = shift;
+    vp->mod_ctrl = ctrl;
+    vp->mod_alt = alt;
+
+    if (left_press)    vp->left_click_held = true;
+    if (left_release)  vp->left_click_held = false;
+    if (mid_press)      vp->mid_click_held = true;
+    if (mid_release)    vp->mid_click_held = false;
+    if (right_press)    vp->right_click_held = true;
+    if (right_release)  vp->right_click_held = false;
+
+    if (wheel_up || wheel_down) {
+        int delta = wheel_up ? -4 : 4;
+        if (shift) vp->offset_x += delta;
+        else vp->offset_y += delta;
+        return;
+    }
+
+    TartRect menu_r, ruler_r, tool_r, y_ruler_r, canvas_r, status_r;
+    tart_compute_layout(app, &menu_r, &ruler_r, &tool_r, &y_ruler_r, &canvas_r, &status_r);
+
+    int wx = (sx >= canvas_r.x) ? (sx - canvas_r.x) + vp->offset_x : -9999;
+    int wy = (sy >= canvas_r.y) ? (sy - canvas_r.y) + vp->offset_y : -9999;
+    vp->mouse_world_x = wx;
+    vp->mouse_world_y = wy;
+    vp->current_mouse_world_x = wx;
+    vp->current_mouse_world_y = wy;
+    vp->vim_cursor_x = wx;
+    vp->vim_cursor_y = wy;
+    vp->cursor_doc_x = wx;
+    vp->cursor_doc_y = wy;
+
+    if (left_press && sx >= tool_r.x && sx < tool_r.x + tool_r.w && sy >= tool_r.y && sy < tool_r.y + tool_r.h) {
+        if (sy == tool_r.y + 3) vp->current_brush = '#';
+        else if (sy == tool_r.y + 4) vp->current_brush = ' ';
+    }
+
+    bool first_event = (vp->last_mouse_screen_x == 0 && vp->last_mouse_screen_y == 0);
+    bool acting = vp->left_click_held || vp->space_held;
+
+    if (acting && !vp->is_dragging) {
+        if (wx >= 0 && wy >= 0) tart_draw_at(app, wx, wy, vp->current_brush);
+    } else if ((acting || vp->is_dragging) && !first_event) {
+        vp->offset_x -= (sx - vp->last_mouse_screen_x);
+        vp->offset_y -= (sy - vp->last_mouse_screen_y);
+    }
+
+    vp->last_mouse_screen_x = sx;
+    vp->last_mouse_screen_y = sy;
 }
 
 void handle_input(App *app) {
     int ch = getch();
-    bool vim_cursor_moved = false;
+    if (ch == ERR) {
+        return;
+    }
 
-    if (ch == 'q' || ch == 'Q') {
-        app->running = 0;
-    } else if (ch == KEY_HOME) {
-        app->viewport.offset_x = -2;
-        app->viewport.offset_y = -2;
-        app->viewport.current_mouse_world_x = 0;
-        app->viewport.current_mouse_world_y = 0;
-        app->viewport.vim_cursor_x = 0;
-        app->viewport.vim_cursor_y = 0;
-    } else if (ch == KEY_END) {
-        int vis_w = COLS - CANVAS_START_X;
-        int vis_h = LINES - 4;
-        app->viewport.offset_x = app->canvas.width - vis_w;
-        app->viewport.offset_y = app->canvas.height - vis_h;
-        app->viewport.vim_cursor_x = app->canvas.width - 1;
-        app->viewport.vim_cursor_y = app->canvas.height - 1;
-        app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
-        app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
-    } else if (ch == KEY_F(1)) {
-        show_help();
-    } else if (ch == 5) {
-        app->viewport.command_mode = 1;
-        app->viewport.mode = 'c';
-        app->viewport.command_len = 0;
-        memset(app->viewport.command_buffer, 0, sizeof(app->viewport.command_buffer));
-    } else if (app->viewport.command_mode) {
-        if (ch == '\n' || ch == KEY_ENTER) {
-            if (strcmp(app->viewport.command_buffer, "q") == 0 || strcmp(app->viewport.command_buffer, "quit") == 0) {
-                app->running = 0;
-            } else if (strcmp(app->viewport.command_buffer, "help") == 0) {
-                show_help();
-            } else if (strcmp(app->viewport.command_buffer, "binds") == 0 || strcmp(app->viewport.command_buffer, "keybinds") == 0) {
-                show_help();
+    bool have_sgr_mouse = false;
+    int sgr_sx = 0, sgr_sy = 0;
+    bool sgr_left_press = false, sgr_left_release = false;
+    bool sgr_mid_press = false, sgr_mid_release = false;
+    bool sgr_right_press = false, sgr_right_release = false;
+    bool sgr_wheel_up = false, sgr_wheel_down = false;
+    bool sgr_shift = false, sgr_ctrl = false, sgr_alt = false;
+
+    if (ch == 27) {
+        /* ncurses' terminfo kmous is the legacy "\E[M" prefix, so it never
+         * recognizes xterm SGR mouse reports ("\E[<...M/m"). Terminals that
+         * support SGR (nearly all modern ones) still emit them once we
+         * request mode 1006, so we parse those bytes by hand here. A real
+         * standalone Escape keypress has nothing following it, so a
+         * zero-delay peek reliably tells the two apart. */
+        timeout(0);
+        int c1 = getch();
+        if (c1 == '[') {
+            int c2 = getch();
+            if (c2 == '<') {
+                int fields[3] = {0, 0, 0};
+                int fidx = 0;
+                int c;
+                bool terminated = false;
+                bool released = false;
+                while ((c = getch()) != ERR) {
+                    if (c >= '0' && c <= '9') {
+                        fields[fidx] = fields[fidx] * 10 + (c - '0');
+                    } else if (c == ';' && fidx < 2) {
+                        fidx++;
+                    } else if (c == 'M' || c == 'm') {
+                        released = (c == 'm');
+                        terminated = true;
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                if (terminated) {
+                    int cb = fields[0];
+                    sgr_sx = fields[1] - 1;
+                    sgr_sy = fields[2] - 1;
+                    sgr_shift = (cb & 4) != 0;
+                    sgr_alt   = (cb & 8) != 0;
+                    sgr_ctrl  = (cb & 16) != 0;
+                    if (cb & 64) {
+                        sgr_wheel_up = ((cb & 1) == 0);
+                        sgr_wheel_down = !sgr_wheel_up;
+                    } else {
+                        int btn = cb & 3;
+                        sgr_left_press    = (!released && btn == 0);
+                        sgr_left_release  = (released && btn == 0);
+                        sgr_mid_press     = (!released && btn == 1);
+                        sgr_mid_release   = (released && btn == 1);
+                        sgr_right_press   = (!released && btn == 2);
+                        sgr_right_release = (released && btn == 2);
+                    }
+                    have_sgr_mouse = true;
+                    ch = KEY_MOUSE;
+                }
+            } else {
+                if (c2 != ERR) ungetch(c2);
+                ungetch('[');
             }
+        } else {
+            if (c1 != ERR) ungetch(c1);
+        }
+        timeout(50);
+    }
+
+    if (app->viewport.help_visible) {
+        if (ch != KEY_MOUSE) {
+            app->viewport.help_visible = false;
+        }
+        return;
+    }
+
+    if (app->viewport.command_mode) {
+        if (ch == '\n' || ch == KEY_ENTER) {
+            const char *buf = app->viewport.command_buffer;
+            const char *resolved = NULL;
+
+            for (size_t i = 0; i < TART_COMMAND_COUNT; i++) {
+                if (strcmp(buf, TART_COMMANDS[i].name) == 0 ||
+                    (TART_COMMANDS[i].alias && strcmp(buf, TART_COMMANDS[i].alias) == 0)) {
+                    resolved = TART_COMMANDS[i].name;
+                    break;
+                }
+            }
+            if (!resolved && buf[0] != '\0') {
+                const char *candidate = NULL;
+                int matches = 0;
+                size_t len = strlen(buf);
+                for (size_t i = 0; i < TART_COMMAND_COUNT; i++) {
+                    if (strncmp(TART_COMMANDS[i].name, buf, len) == 0) {
+                        candidate = TART_COMMANDS[i].name;
+                        matches++;
+                    }
+                }
+                if (matches == 1) resolved = candidate;
+            }
+
+            if (resolved) {
+                if (strcmp(resolved, "quit") == 0) {
+                    app->running = 0;
+                } else if (strcmp(resolved, "help") == 0) {
+                    app->viewport.help_visible = true;
+                }
+            }
+
             app->viewport.command_mode = 0;
             app->viewport.mode = 'n';
             app->viewport.command_len = 0;
@@ -89,146 +189,174 @@ void handle_input(App *app) {
             app->viewport.command_buffer[app->viewport.command_len++] = ch;
             app->viewport.command_buffer[app->viewport.command_len] = '\0';
         }
-    } else if (ch == 'e' || ch == 'E') {
+        return;
+    }
+
+    if (ch == ':' || ch == 5) {
+        app->viewport.command_mode = 1;
+        app->viewport.mode = 'c';
+        app->viewport.command_len = 0;
+        memset(app->viewport.command_buffer, 0, sizeof(app->viewport.command_buffer));
+        return;
+    }
+
+    bool vim_cursor_moved = false;
+
+    if (ch == 'q' || ch == 'Q') {
+        app->running = 0;
+    }
+    if (ch == ' ') {
+        app->viewport.space_held = true;
+    } else if (ch != KEY_MOUSE) {
+        app->viewport.space_held = false;
+    }
+    if (ch == KEY_HOME) {
+        app->viewport.offset_x = 0;
+        app->viewport.offset_y = 0;
+        app->viewport.current_mouse_world_x = 0;
+        app->viewport.current_mouse_world_y = 0;
+        app->viewport.vim_cursor_x = 0;
+        app->viewport.vim_cursor_y = 0;
+    }
+    if (ch == KEY_END) {
+        int last_x = app->canvas.width - 1;
+        int last_y = app->canvas.height - 1;
+        app->viewport.vim_cursor_x = last_x;
+        app->viewport.vim_cursor_y = last_y;
+        app->viewport.current_mouse_world_x = last_x;
+        app->viewport.current_mouse_world_y = last_y;
+
+        int vis_w = COLS - CANVAS_START_X;
+        int vis_h = LINES - 4;
+        if (last_x < app->viewport.offset_x || last_x > app->viewport.offset_x + vis_w - 1) {
+            app->viewport.offset_x = last_x - vis_w / 2;
+        }
+        if (last_y < app->viewport.offset_y || last_y > app->viewport.offset_y + vis_h - 1) {
+            app->viewport.offset_y = last_y - vis_h / 2;
+        }
+    }
+    if (ch == KEY_F(1)) {
+        app->viewport.help_visible = true;
+    }
+    if (ch == 'e' || ch == 'E') {
         app->viewport.current_brush = ' ';
-    } else if (ch == 'p' || ch == 'P') {
+    }
+    if (ch == 'p' || ch == 'P') {
         app->viewport.current_brush = '#';
-    } else if (ch == ' ') {
+    }
+    if (ch == 'v' || ch == 'V') {
         app->viewport.is_dragging = !app->viewport.is_dragging;
         app->viewport.mode = app->viewport.is_dragging ? 'p' : 'n';
-    } else if (ch == 'h') {
+    }
+    if (ch == 'h') {
         app->viewport.vim_cursor_x--;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
         app->viewport.mode = 'n';
-    } else if (ch == 'l') {
+    }
+    if (ch == 'l') {
         app->viewport.vim_cursor_x++;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
         app->viewport.mode = 'n';
-    } else if (ch == 'j') {
+    }
+    if (ch == 'j') {
         app->viewport.vim_cursor_y++;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
         app->viewport.mode = 'n';
-    } else if (ch == 'k') {
+    }
+    if (ch == 'k') {
         app->viewport.vim_cursor_y--;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
         app->viewport.mode = 'n';
-    } else if (ch == '0') {
+    }
+    if (ch == '0') {
         app->viewport.vim_cursor_x = 0;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
-    } else if (ch == '$') {
+    }
+    if (ch == '$') {
         app->viewport.vim_cursor_x = app->canvas.width - 1;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
-    } else if (ch == 'w') {
+    }
+    if (ch == 'w') {
         app->viewport.vim_cursor_x += 5;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
-    } else if (ch == 'b') {
+    }
+    if (ch == 'b') {
         app->viewport.vim_cursor_x -= 5;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
-    } else if (ch == 'G') {
+    }
+    if (ch == 'G') {
         app->viewport.vim_cursor_y = app->canvas.height - 1;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
-    } else if (ch == 'g') {
+    }
+    if (ch == 'g') {
         app->viewport.vim_cursor_y = 0;
         app->viewport.current_mouse_world_x = app->viewport.vim_cursor_x;
         app->viewport.current_mouse_world_y = app->viewport.vim_cursor_y;
         vim_cursor_moved = true;
-    } else if (ch == 4) {
+    }
+    if (ch == 4) {
         app->viewport.offset_y += (LINES - 4) / 2;
         app->viewport.mode = 'n';
-    } else if (ch == 21) {
+    }
+    if (ch == 21) {
         app->viewport.offset_y -= (LINES - 4) / 2;
         app->viewport.mode = 'n';
-    } else if (ch == KEY_PPAGE) {
+    }
+    if (ch == KEY_PPAGE) {
         app->viewport.offset_y -= LINES - 4;
         app->viewport.mode = 'n';
-    } else if (ch == KEY_NPAGE) {
+    }
+    if (ch == KEY_NPAGE) {
         app->viewport.offset_y += LINES - 4;
         app->viewport.mode = 'n';
-    } else if (ch == KEY_LEFT) {
+    }
+    if (ch == KEY_LEFT) {
         app->viewport.offset_x -= 5;
-    } else if (ch == KEY_RIGHT) {
+    }
+    if (ch == KEY_RIGHT) {
         app->viewport.offset_x += 5;
-    } else if (ch == KEY_UP) {
+    }
+    if (ch == KEY_UP) {
         app->viewport.offset_y -= 3;
-    } else if (ch == KEY_DOWN) {
+    }
+    if (ch == KEY_DOWN) {
         app->viewport.offset_y += 3;
-    } else if (ch == KEY_MOUSE) {
-        MEVENT event;
-        if (getmouse(&event) == OK) {
-            int sx = event.x;
-            int sy = event.y;
-
-            if (!(event.bstate & (BUTTON4_PRESSED | BUTTON5_PRESSED))) {
-                int wx = (sx >= CANVAS_START_X) ? (sx - CANVAS_START_X) + app->viewport.offset_x : -9999;
-                int wy = (sy >= 3) ? (sy - 3) + app->viewport.offset_y : -9999;
-                app->viewport.mouse_world_x = wx;
-                app->viewport.mouse_world_y = wy;
-                app->viewport.current_mouse_world_x = wx;
-                app->viewport.current_mouse_world_y = wy;
-                app->viewport.vim_cursor_x = wx;
-                app->viewport.vim_cursor_y = wy;
-                app->viewport.cursor_doc_x = wx;
-                app->viewport.cursor_doc_y = wy;
-            }
-
-            if (event.bstate & BUTTON1_PRESSED) {
-                if (app->viewport.is_dragging) {
-                    app->viewport.last_mouse_screen_x = sx;
-                    app->viewport.last_mouse_screen_y = sy;
-                }
-            }
-            if (event.bstate & BUTTON1_RELEASED) {
-            }
-
-            if ((event.bstate & REPORT_MOUSE_POSITION) && app->viewport.is_dragging) {
-                int dx = sx - app->viewport.last_mouse_screen_x;
-                int dy = sy - app->viewport.last_mouse_screen_y;
-                app->viewport.offset_x -= dx;
-                app->viewport.offset_y -= dy;
-                app->viewport.last_mouse_screen_x = sx;
-                app->viewport.last_mouse_screen_y = sy;
-            }
-
-            if (event.bstate & BUTTON4_PRESSED) {
-                if (event.bstate & BUTTON_SHIFT) app->viewport.offset_x -= 4;
-                else app->viewport.offset_y -= 4;
-            }
-            if (event.bstate & BUTTON5_PRESSED) {
-                if (event.bstate & BUTTON_SHIFT) app->viewport.offset_x += 4;
-                else app->viewport.offset_y += 4;
-            }
-
-            if (sx < CANVAS_START_X && sy >= 3 && sy < LINES - 1) {
-                if (sy == 6) app->viewport.current_brush = '#';
-                else if (sy == 7) app->viewport.current_brush = ' ';
-            }
-
-            if (sx >= CANVAS_START_X && sy >= 3 && sy < LINES - 1) {
-                int world_x = (sx - CANVAS_START_X) + app->viewport.offset_x;
-                int world_y = (sy - 3) + app->viewport.offset_y;
-                if (event.bstate & (BUTTON1_PRESSED | REPORT_MOUSE_POSITION)) {
-                    if (!app->viewport.is_dragging) {
-                        tart_draw_at(app, world_x, world_y, app->viewport.current_brush);
-                    }
-                }
+    }
+    if (ch == KEY_MOUSE) {
+        if (have_sgr_mouse) {
+            tart_apply_mouse(app, sgr_sx, sgr_sy,
+                sgr_left_press, sgr_left_release,
+                sgr_mid_press, sgr_mid_release,
+                sgr_right_press, sgr_right_release,
+                sgr_wheel_up, sgr_wheel_down,
+                sgr_shift, sgr_ctrl, sgr_alt);
+        } else {
+            MEVENT event;
+            if (getmouse(&event) == OK) {
+                tart_apply_mouse(app, event.x, event.y,
+                    (event.bstate & BUTTON1_PRESSED) != 0, (event.bstate & BUTTON1_RELEASED) != 0,
+                    (event.bstate & BUTTON2_PRESSED) != 0, (event.bstate & BUTTON2_RELEASED) != 0,
+                    (event.bstate & BUTTON3_PRESSED) != 0, (event.bstate & BUTTON3_RELEASED) != 0,
+                    (event.bstate & BUTTON4_PRESSED) != 0, (event.bstate & BUTTON5_PRESSED) != 0,
+                    (event.bstate & BUTTON_SHIFT) != 0, (event.bstate & BUTTON_CTRL) != 0, (event.bstate & BUTTON_ALT) != 0);
             }
         }
     }
