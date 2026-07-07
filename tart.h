@@ -19,10 +19,9 @@
 
 #define TART_VERSION "0.4.0"
 
-/* Coordinate convention used throughout: sx/sy name a screen (terminal cell)
- * position; wx/wy name a world (canvas/document) position. offset_x/offset_y
- * is the world coordinate currently sitting under the canvas viewport's
- * top-left screen cell, i.e. the pan origin. */
+/* sx/sy = screen (terminal cell) pos. wx/wy = world (canvas/document) pos.
+ * offset_x/offset_y = world coord under canvas viewport's top-left screen
+ * cell — the pan origin. */
 
 #define MAX_CANVAS_WIDTH  512
 #define MAX_CANVAS_HEIGHT 256
@@ -39,14 +38,13 @@
 #define TOOL_PANEL_WIDTH 18
 #define Y_RULER_WIDTH 5
 #define CANVAS_START_X (TOOL_PANEL_WIDTH + Y_RULER_WIDTH)
-/* Visible canvas viewport size in screen cells. -1 on the width reserves the
+/* Visible canvas viewport size in screen cells. -1 on width reserves the
  * column the right border renders on (without it, canvas.x + canvas.w lands
- * exactly on COLS, one past the last valid column, so that border would
- * silently never appear); -6 on the height reserves 3 header rows plus one
- * dedicated row each for the bottom border, the animation bar, and the
- * status/command bar. Kept as macros since several places outside
- * tart_compute_layout need to agree with them exactly (view clamping,
- * End-key centering, page-scroll amounts, ...). */
+ * exactly on COLS, one past last valid column — border would silently never
+ * appear); -6 on height reserves 3 header rows plus one dedicated row each
+ * for bottom border, animation bar, status/command bar. Kept as macros —
+ * several places outside tart_compute_layout must agree with them exactly
+ * (view clamping, End-key centering, page-scroll amounts, ...). */
 #define CANVAS_VIEW_W (COLS - CANVAS_START_X - 1)
 #define CANVAS_VIEW_H (LINES - 6)
 
@@ -54,9 +52,8 @@
 
 #define CMD_PALETTE_MAX_VISIBLE 6
 
-/* One entry in the ':' command palette / menu system. alias is an optional
- * short form (e.g. "q" for "quit"); desc is what menus display instead of
- * the raw name. */
+/* One entry in ':' command palette / menu system. alias = optional short
+ * form (e.g. "q" for "quit"); desc = what menus display instead of raw name. */
 typedef struct {
     const char *name;
     const char *alias;
@@ -74,6 +71,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
     { "resize", NULL, "Resize canvas (WxH)" },
+    { "new", NULL, "New blank file" },
     { "save", NULL, "Save to file" },
     { "load", NULL, "Load from file" },
     { "play", NULL, "Play/stop animation" },
@@ -87,9 +85,9 @@ static const TartCommand TART_COMMANDS[] = {
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
-/* One top-level menu: a label plus the command names (from TART_COMMANDS)
- * shown in its dropdown, in order. Every label's first letter doubles as
- * its Alt+<letter> mnemonic, so they must stay unique. */
+/* One top-level menu: label plus command names (from TART_COMMANDS) shown in
+ * its dropdown, in order. Every label's first letter doubles as its
+ * Alt+<letter> mnemonic — must stay unique. */
 typedef struct {
     const char *label;
     const char *items[5];
@@ -97,7 +95,7 @@ typedef struct {
 } TartMenuDef;
 
 static const TartMenuDef TART_MENUS[] = {
-    { "File",  { "save", "load", "quit" },              3 },
+    { "File",  { "new", "save", "load", "quit" },       4 },
     { "Edit",  { "undo", "redo", "history", "deselect" }, 4 },
     { "View",  { "reset-view", "toggle-pan", "onion" }, 3 },
     { "Image", { "resize" },                            1 },
@@ -107,8 +105,8 @@ static const TartMenuDef TART_MENUS[] = {
 };
 #define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
 
-/* Computed screen position of one menu-bar label, so the renderer and the
- * click hit-test in input.c agree on where each menu name sits. */
+/* Computed screen position of one menu-bar label — renderer and click
+ * hit-test in input.c agree on where each menu name sits. */
 typedef struct {
     const char *label;
     int x0, x1;
@@ -121,9 +119,9 @@ typedef enum {
 } TartTool;
 typedef enum { BRUSH_SQUARE, BRUSH_ROUND } BrushShape;
 
-/* PROMPT_NONE means no modal text-entry prompt is open; any other value
- * both opens the prompt (see tart_draw_prompt) and says what Enter should
- * do with its buffer once submitted. */
+/* PROMPT_NONE = no modal text-entry prompt open; any other value both opens
+ * prompt (see tart_draw_prompt) and says what Enter does with its buffer
+ * once submitted. */
 typedef enum {
     PROMPT_NONE,
     PROMPT_RESIZE,
@@ -133,9 +131,9 @@ typedef enum {
     PROMPT_FPS,
 } TartPromptMode;
 
-/* One region of the animation bar (the frame/layer/playback controls row
- * between the canvas and the status bar); ANIM_NONE marks plain text. Same
- * renderer/hit-test pairing idea as TartPanelRow. */
+/* One region of animation bar (frame/layer/playback controls row between
+ * canvas and status bar); ANIM_NONE marks plain text. Same renderer/hit-test
+ * pairing idea as TartPanelRow. */
 typedef enum {
     ANIM_NONE,
     ANIM_FRAME_PREV, ANIM_FRAME_NEXT, ANIM_FRAME_ADD, ANIM_FRAME_DUP, ANIM_FRAME_DEL,
@@ -152,8 +150,8 @@ typedef struct {
 #define TART_ANIM_MAX_ITEMS 24
 
 /* What clicking a given tool-panel row does; see tart_apply_panel_action.
- * Shared between the panel's own click hit-test and identical keyboard
- * shortcuts ('[', ']', Tab, ...) so both paths funnel through one place. */
+ * Shared between panel's own click hit-test and identical keyboard shortcuts
+ * ('[', ']', Tab, ...) — both paths funnel through one place. */
 typedef enum {
     PANEL_NONE,
     PANEL_SELECT_TOOL,
@@ -166,12 +164,11 @@ typedef enum {
     PANEL_FILL_CHAR_OPEN,
     PANEL_MOVE_CUT_TOGGLE,
     PANEL_FILL_RANDOM_TOGGLE,
-    PANEL_COLOR_OPEN,
     PANEL_COLOR_SET,     /* value = index into TART_BASIC_COLORS */
 } TartPanelAction;
 
-/* Which brush the char palette popup is picking a glyph for: the pencil's
- * main tip, or the rect tool's fill character. */
+/* Which brush char palette popup picks a glyph for: pencil's main tip, or
+ * rect tool's fill character. */
 typedef enum { PALETTE_TARGET_PENCIL, PALETTE_TARGET_FILL } PaletteTarget;
 
 typedef struct {
@@ -189,22 +186,22 @@ static const TartPaletteCategory TART_PALETTE[] = {
     { "Lines (light)",      L"│─" },
     { "Lines (double)",     L"║═" },
     { "Lines (heavy)",      L"┃━" },
+    { "Runes",              L"ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛊᛏᛒᛖᛗᛚᛜᛞᛟ" },
     { "Special",            L" " },
 };
 #define TART_PALETTE_CAT_COUNT (sizeof(TART_PALETTE) / sizeof(TART_PALETTE[0]))
 #define PALETTE_LABEL_WIDTH 20
 #define PALETTE_CHAR_CELL_W 2
 
-/* Quick-access basic colors for the '['/']' cycle keys, so common colors
- * don't require opening the full HSL picker. Values are xterm-256 indices;
- * plain black (0) is skipped because Canvas.colors uses 0 as its own
- * "no color" sentinel, so cube-black (16) stands in for it instead. */
-static const unsigned char TART_BASIC_COLORS[] = { 15, 9, 10, 11, 12, 13, 14, 16 };
+/* Quick colors for '['/']' cycle keys and panel swatch row, in fixed order:
+ * white, gray, ROYGBIV, black. Values are xterm-256 indices; plain black (0)
+ * skipped since Canvas.colors uses 0 as its own "no color" sentinel —
+ * cube-black (16) stands in for it instead. */
+static const unsigned char TART_BASIC_COLORS[] = { 15, 244, 196, 208, 226, 46, 21, 57, 129, 16 };
 #define TART_BASIC_COLOR_COUNT (sizeof(TART_BASIC_COLORS) / sizeof(TART_BASIC_COLORS[0]))
 
-/* Discrete brush/eraser sizes for the '-'/'=' cycle keys and the size
- * slider; shared with tart_cycle_size in input.c so panel and keyboard
- * agree on the same stops. */
+/* Discrete brush/eraser sizes for '-'/'=' cycle keys and size slider; shared
+ * with tart_cycle_size in input.c — panel and keyboard agree on same stops. */
 static const int TART_BRUSH_SIZES[] = { 1, 3, 5, 7, 9, 13, 17, 21 };
 #define TART_BRUSH_SIZE_COUNT (sizeof(TART_BRUSH_SIZES) / sizeof(TART_BRUSH_SIZES[0]))
 
@@ -217,17 +214,18 @@ typedef struct {
 
 #define TOOL_PANEL_MAX_ROWS 32
 
-/* Row layout shared by the tool-panel renderer and its click hit-test, so
- * they can never drift out of sync with each other. */
-#define TP_ROW_TOOLS_HEADER   1
-#define TP_ROW_PENCIL         3
-#define TP_ROW_LINE           4
-#define TP_ROW_CURVE          5
-#define TP_ROW_RECT           6
-#define TP_ROW_ELLIPSE        7
-#define TP_ROW_TRI            8
+/* Row layout shared by tool-panel renderer and its click hit-test — can
+ * never drift out of sync with each other. Tools sit in four groups split
+ * by blank rows: freehand (draw/eraser/line/curve), shapes, fill,
+ * select/move. */
+#define TP_ROW_PENCIL         0
+#define TP_ROW_ERASER         1
+#define TP_ROW_LINE           2
+#define TP_ROW_CURVE          3
+#define TP_ROW_RECT           5
+#define TP_ROW_ELLIPSE        6
+#define TP_ROW_TRI            7
 #define TP_ROW_FILL           9
-#define TP_ROW_ERASER         10
 #define TP_ROW_SELECT         11
 #define TP_ROW_MOVE           12
 #define TP_ROW_OPTIONS_HEADER 14
@@ -239,7 +237,7 @@ typedef struct {
 #define TP_SIZE_DEC_X         9
 #define TP_SIZE_INC_X         12
 #define TP_SIZE_SLIDER_DOT_X0 3     /* first size-slider dot's column offset from tool_r.x */
-#define TP_COLOR_SLIDER_DOT_X0 8    /* first color-slider dot's column offset from tool_r.x */
+#define TP_COLOR_SLIDER_DOT_X0 7    /* first color-slider dot's column offset from tool_r.x */
 
 #define PAN_VOID_MARGIN 10
 
@@ -250,19 +248,19 @@ typedef struct {
     unsigned char *colors; /* 0 = no color/default; 1-255 = xterm-256 palette index */
 } Canvas;
 
-/* One animation frame: a bottom-to-top stack of same-sized canvases. A cell
- * whose glyph is a space is transparent - lower layers show through - which
- * is what lets a character layer sit on top of a background layer. */
+/* One animation frame: bottom-to-top stack of same-sized canvases. Cell with
+ * space glyph is transparent — lower layers show through — lets a character
+ * layer sit on top of a background layer. */
 typedef struct {
     Canvas layers[MAX_LAYERS];
 } Frame;
 
-/* One undo/redo entry: a full snapshot of a single layer canvas, taken just
- * before an edit gesture (stroke, rect stamp, move paste) touches it.
+/* One undo/redo entry: full snapshot of single layer canvas, taken just
+ * before edit gesture (stroke, rect stamp, move paste) touches it.
  * Structural changes (frame/layer add/del, resize, load) clear both stacks
- * rather than trying to keep frame/layer indices valid across them. */
+ * instead of trying to keep frame/layer indices valid across them. */
 typedef struct {
-    const char *desc;   /* action name for the history viewer; always a static string */
+    const char *desc;   /* action name for history viewer; always static string */
     int frame, layer;
     int width, height;
     wchar_t *cells;
@@ -295,46 +293,42 @@ typedef struct {
     int palette_hover_char;
 
     /* Shared drag state for rect/select/move/shape tools (see tart_tool_rect
-     * etc. in input.c) - what's being dragged depends on `tool` above. */
+     * etc. in input.c) — what's dragged depends on `tool` above. */
     bool tool_dragging;
     int drag_start_wx, drag_start_wy;
     int drag_cur_wx, drag_cur_wy;
 
-    /* Curve tool's second stage: endpoints are frozen in drag_start/drag_cur
-     * and the control point rides the cursor until a click commits. */
+    /* Curve tool's second stage: endpoints frozen in drag_start/drag_cur,
+     * control point rides cursor until a click commits. */
     bool curve_pending;
     int curve_cx, curve_cy;
     bool has_selection;
     int sel_w, sel_h;
-    int sel_origin_wx, sel_origin_wy;  /* top-left of the selected region, for its persistent highlight */
+    int sel_origin_wx, sel_origin_wy;  /* top-left of selected region — persistent highlight */
     wchar_t *sel_buffer;
     unsigned char *sel_colors;
     bool move_cut;  /* false = stamp (keep source, repeatable); true = cut (clears source, one-shot) */
     bool fill_random;   /* bucket fill draws random glyphs from fill_char's palette row */
 
-    /* Color: current_color paints; the HSL picker and the '['/']' quick
-     * palette are two different ways of setting it. */
+    /* Color: current_color paints; set via '['/']' cycle or a swatch click. */
     unsigned char current_color;
     int quick_color_idx;        /* position in TART_BASIC_COLORS for [/] cycling */
-    bool color_picker_visible;
-    int hsl_h, hsl_s, hsl_l;
-    int color_slider_focus;
 
     /* Top menu bar (File/Edit/View/Image/Help). */
     int open_menu;               /* -1 = closed, else index into TART_MENUS */
     int menu_hover_item;
 
     /* ':' command palette. */
-    int cmd_selected;           /* index into the current fuzzy-match list */
-    int cmd_scroll_off;         /* first visible row when matches overflow the popup */
+    int cmd_selected;           /* index into current fuzzy-match list */
+    int cmd_scroll_off;         /* first visible row when matches overflow popup */
 
     /* Modal single-line text prompt (resize/save/load/custom-char). */
     TartPromptMode prompt_mode;
     char prompt_buffer[256];
     int prompt_len;
 
-    /* Cell the "cursor" highlight is drawn on - kept in sync with whichever
-     * of mouse or vim-style keyboard nav moved last. */
+    /* Cell the "cursor" highlight draws on — synced with whichever of mouse
+     * or vim-style keyboard nav moved last. */
     int current_mouse_world_x;
     int current_mouse_world_y;
     int vim_cursor_x;
@@ -346,8 +340,9 @@ typedef struct {
     char mode;              /* status-bar badge: 'n' normal, 'p' pan, 'c' command */
     bool space_held;
     bool left_click_held;   /* drives "is a draw/pan gesture active" */
-    bool stroke_open;       /* a draw/erase gesture is mid-flight; its undo snapshot is already taken */
+    bool stroke_open;       /* draw/erase gesture mid-flight; undo snapshot already taken */
     bool help_visible;
+    int help_scroll;    /* first visible help line when overlay taller than terminal */
     bool about_visible;
     bool history_visible;   /* undo/redo history viewer (Up/Down walk it live) */
 } Viewport;
@@ -360,7 +355,7 @@ typedef struct {
 } TartRect;
 
 typedef struct {
-    /* Document: frame_count frames of layer_count layers each (uniform -
+    /* Document: frame_count frames of layer_count layers each (uniform —
      * adding/deleting a layer touches every frame), every canvas exactly
      * width x height. All editing applies to cur_frame/cur_layer; rendering
      * composites cur_frame's whole layer stack. */
@@ -372,10 +367,10 @@ typedef struct {
     int cur_layer;
 
     /* Playback + animation editing aids. */
-    int fps;            /* playback speed, persisted in the save file */
+    int fps;            /* playback speed, persisted in save file */
     bool playing;
-    bool onion;         /* ghost the previous frame under the current one */
-    long play_last_ms;  /* CLOCK_MONOTONIC ms of the last playback advance */
+    bool onion;         /* ghost previous frame under current one */
+    long play_last_ms;  /* CLOCK_MONOTONIC ms of last playback advance */
 
     TartUndoState undo_stack[UNDO_STACK_MAX];
     TartUndoState redo_stack[UNDO_STACK_MAX];
@@ -416,10 +411,6 @@ bool tart_rect_outline(int x, int y, int rx, int ry, int rect_w, int rect_h);
 wchar_t tart_read_cell(App *app, int x, int y);
 void tart_set_color(App *app, int x, int y, unsigned char color);
 unsigned char tart_read_color(App *app, int x, int y);
-void tart_hsl_to_rgb(int h, int s, int l, int *r, int *g, int *b);
-int tart_rgb_to_256(int r, int g, int b);
-void tart_draw_color_picker(App *app);
-void tart_compute_color_picker_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_bar_x, int *out_bar_w);
 int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]);
 int tart_build_menu_bar(App *app, TartMenuBarItem items[TART_MENU_COUNT]);
 void tart_draw_tool_panel(App *app, TartRect tool_r);
@@ -431,6 +422,7 @@ void tart_draw_prompt(App *app, TartRect status_r);
 void tart_compute_palette_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_max_chars);
 void tart_draw_palette(App *app);
 bool tart_resize_doc(App *app, int new_w, int new_h);
+bool tart_new_doc(App *app);
 bool tart_save_doc(App *app, const char *path);
 bool tart_load_doc(App *app, const char *path);
 void tart_draw_box(int x, int y, int w, int h);
@@ -457,13 +449,13 @@ void cleanup_canvas(Canvas *c) {
     if (c->colors) { free(c->colors); c->colors = NULL; }
 }
 
-/* The canvas all editing tools act on: the active layer of the active frame. */
+/* Canvas all editing tools act on: active layer of active frame. */
 Canvas *tart_canvas(App *app) {
     return &app->frames[app->cur_frame].layers[app->cur_layer];
 }
 
 /* Composited view of one frame's layer stack at (x,y): topmost non-space
- * glyph wins, space is transparent. Caller guarantees bounds. */
+ * glyph wins, space transparent. Caller guarantees bounds. */
 wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color) {
     for (int l = app->layer_count - 1; l >= 0; l--) {
         Canvas *c = &app->frames[frame].layers[l];
@@ -477,9 +469,8 @@ wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_col
     return L' ';
 }
 
-/* Insert a frame right after the current one and switch to it; dup copies
- * the current frame's layers (the usual animation step), otherwise the new
- * frame is blank. */
+/* Insert a frame right after current one, switch to it; dup copies current
+ * frame's layers (usual animation step), else new frame is blank. */
 bool tart_frame_add(App *app, bool dup) {
     if (app->frame_count >= MAX_FRAMES) return false;
     Frame nf;
@@ -514,10 +505,9 @@ void tart_frame_del(App *app) {
     tart_undo_clear(app);
 }
 
-/* Layer count is uniform across frames, so add/del touch every frame. The
- * new layer goes directly above the current one and becomes active. Blanks
- * are staged before any frame is touched so a failed alloc can't leave the
- * document ragged. */
+/* Layer count uniform across frames — add/del touch every frame. New layer
+ * goes directly above current one, becomes active. Blanks staged before any
+ * frame is touched — failed alloc can't leave document ragged. */
 bool tart_layer_add(App *app) {
     if (app->layer_count >= MAX_LAYERS) return false;
     static Canvas stage[MAX_FRAMES];
@@ -574,7 +564,7 @@ static bool tart_undo_snapshot(App *app, int frame, int layer, TartUndoState *ou
     return true;
 }
 
-/* Push onto a bounded stack; when full the oldest entry falls off. */
+/* Push onto bounded stack; oldest entry falls off when full. */
 static void tart_undo_stack_push(TartUndoState *stack, int *count, TartUndoState s) {
     if (*count == UNDO_STACK_MAX) {
         tart_undo_free_state(&stack[0]);
@@ -584,9 +574,9 @@ static void tart_undo_stack_push(TartUndoState *stack, int *count, TartUndoState
     stack[(*count)++] = s;
 }
 
-/* Call just before an edit gesture modifies the active canvas: one call =
- * one undoable step, labeled with desc (a static string) for the history
- * viewer. A fresh edit invalidates the redo stack. */
+/* Call just before edit gesture modifies active canvas: one call = one
+ * undoable step, labeled with desc (static string) for history viewer.
+ * Fresh edit invalidates redo stack. */
 void tart_undo_push(App *app, const char *desc) {
     TartUndoState s;
     if (!tart_undo_snapshot(app, app->cur_frame, app->cur_layer, &s)) return;
@@ -595,14 +585,14 @@ void tart_undo_push(App *app, const char *desc) {
     while (app->redo_count > 0) tart_undo_free_state(&app->redo_stack[--app->redo_count]);
 }
 
-/* Undo and redo are the same swap in opposite directions: pop a snapshot,
- * save the canvas's present state onto the other stack, restore, and jump
- * the editor to that frame/layer so the change is visible. */
+/* Undo and redo are the same swap in opposite directions: pop snapshot,
+ * save canvas's present state onto other stack, restore, jump editor to
+ * that frame/layer so change is visible. */
 static void tart_undo_apply(App *app, TartUndoState *from, int *from_count,
                             TartUndoState *to, int *to_count) {
     if (*from_count == 0) return;
     TartUndoState s = from[*from_count - 1];
-    /* Structure ops clear the stacks, so entries always reference a live
+    /* Structure ops clear stacks, so entries always reference a live
      * same-sized canvas; guard anyway. */
     if (s.frame >= app->frame_count || s.layer >= app->layer_count ||
         s.width != app->width || s.height != app->height) {
@@ -612,7 +602,7 @@ static void tart_undo_apply(App *app, TartUndoState *from, int *from_count,
     }
     TartUndoState cur;
     if (!tart_undo_snapshot(app, s.frame, s.layer, &cur)) return;
-    cur.desc = s.desc;   /* the label stays with its slot in the timeline */
+    cur.desc = s.desc;   /* label stays with its slot in timeline */
     tart_undo_stack_push(to, to_count, cur);
 
     Canvas *c = &app->frames[s.frame].layers[s.layer];
@@ -620,9 +610,9 @@ static void tart_undo_apply(App *app, TartUndoState *from, int *from_count,
     memcpy(c->colors, s.colors, (size_t)s.width * s.height);
     app->cur_frame = s.frame;
     app->cur_layer = s.layer;
-    /* Undo/redo can jump to a different frame/layer than the one a half-built
-     * shape drag started on; a stale gesture must not commit onto the new
-     * target after this jump. */
+    /* Undo/redo can jump to different frame/layer than the one a half-built
+     * shape drag started on; stale gesture must not commit onto new target
+     * after this jump. */
     app->viewport.tool_dragging = false;
     app->viewport.curve_pending = false;
     app->viewport.stroke_open = false;
@@ -650,7 +640,7 @@ void init_app(App *app) {
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
-    timeout(50);        /* getch blocks at most 50ms, so the UI stays live */
+    timeout(50);        /* getch blocks at most 50ms — UI stays live */
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
     printf("\033[?1003h\033[?1006h");   // any-motion tracking (1003) + SGR extended encoding (1006)
     fflush(stdout);
@@ -660,15 +650,15 @@ void init_app(App *app) {
     init_pair(2, COLOR_WHITE, COLOR_BLACK);
     init_pair(3, COLOR_BLACK, COLOR_WHITE);
     init_pair(4, COLOR_YELLOW, COLOR_BLACK);
-    /* Dark-slate menu chrome (pair 5) and its hover/open highlight (pair 6),
-     * styled after a dark code editor's menu bar instead of a reversed-white
+    /* Dark-slate menu chrome (pair 5) and hover/open highlight (pair 6),
+     * styled after dark code editor's menu bar instead of reversed-white
      * classic-desktop look. */
     init_pair(5, 253, 236);
     init_pair(6, 255, 24);
-    /* Canvas cell colors use a dedicated 256-color palette, offset by 16 to
-     * stay clear of the chrome pairs above (COLORS/pairs here are 256/65536
-     * per terminfo, so there's ample room). Index 0 in Canvas.colors means
-     * "no color / default" and is never looked up as a pair. */
+    /* Canvas cell colors use dedicated 256-color palette, offset by 16 to
+     * stay clear of chrome pairs above (COLORS/pairs here are 256/65536 per
+     * terminfo — ample room). Index 0 in Canvas.colors means "no color /
+     * default", never looked up as a pair. */
     for (int i = 0; i < 256; i++) {
         init_pair(16 + i, i, COLOR_BLACK);
     }
@@ -686,19 +676,17 @@ void init_app(App *app) {
     app->redo_count = 0;
     init_canvas(&app->frames[0].layers[0], app->width, app->height);
 
-    /* Zero is the correct default for nearly every Viewport field (TOOL_PENCIL,
-     * BRUSH_SQUARE, PROMPT_NONE, ... are all 0), so clear the struct and list
-     * only the exceptions. */
+    /* Zero is correct default for nearly every Viewport field (TOOL_PENCIL,
+     * BRUSH_SQUARE, PROMPT_NONE, ... all 0) — clear struct, list only the
+     * exceptions. */
     Viewport *vp = &app->viewport;
     memset(vp, 0, sizeof(*vp));
-    vp->offset_x = -2;      /* start panned slightly out so the canvas edge is visible */
+    vp->offset_x = -2;      /* start panned slightly out — canvas edge visible */
     vp->offset_y = -2;
     vp->brush_char = L'#';
     vp->brush_size = 1;
     vp->eraser_size = 1;
     vp->fill_char = L'#';
-    vp->hsl_s = 100;
-    vp->hsl_l = 50;
     vp->open_menu = -1;
     vp->mode = 'n';
     app->running = 1;
@@ -771,9 +759,9 @@ void tart_stamp(App *app, int cx, int cy, int size, BrushShape shape, wchar_t ch
     }
 }
 
-/* True if (dx,dy) - an offset from the brush center - sits on the outline
- * (not interior) of the size/shape footprint tart_stamp would paint, so the
- * cursor preview can trace just the perimeter rather than filling it. */
+/* True if (dx,dy) — offset from brush center — sits on outline (not
+ * interior) of size/shape footprint tart_stamp would paint, so cursor
+ * preview can trace just the perimeter instead of filling it. */
 bool tart_brush_outline(int dx, int dy, int size, BrushShape shape) {
     int r = (size - 1) / 2;
     if (dx < -r || dx > r || dy < -r || dy > r) return false;
@@ -786,9 +774,9 @@ bool tart_brush_outline(int dx, int dy, int size, BrushShape shape) {
            dx * dx + (dy + 1) * (dy + 1) > r2 || dx * dx + (dy - 1) * (dy - 1) > r2;
 }
 
-/* True if world (x,y) sits on the perimeter of the rect_w x rect_h box whose
- * top-left is (rx,ry) - used to keep the current selection outlined on the
- * canvas at all times, not just while it's being dragged out. */
+/* True if world (x,y) sits on perimeter of rect_w x rect_h box whose
+ * top-left is (rx,ry) — keeps current selection outlined on canvas at all
+ * times, not just while being dragged out. */
 bool tart_rect_outline(int x, int y, int rx, int ry, int rect_w, int rect_h) {
     if (x < rx || x >= rx + rect_w || y < ry || y >= ry + rect_h) return false;
     return (x == rx || x == rx + rect_w - 1 || y == ry || y == ry + rect_h - 1);
@@ -799,7 +787,7 @@ bool tart_rect_outline(int x, int y, int rx, int ry, int rect_w, int rect_h) {
 #endif
 
 static void tart_plot_seg(int x0, int y0, int x1, int y1, TartPlotFn plot, void *ctx) {
-    /* Bresenham, the integer-error form that handles all octants. */
+    /* Bresenham, integer-error form, handles all octants. */
     int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
     int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
@@ -812,12 +800,12 @@ static void tart_plot_seg(int x0, int y0, int x1, int y1, TartPlotFn plot, void 
     }
 }
 
-/* Emits every cell of a shape through the plot callback, so the live drag
- * preview in render() and the commit path in input.c trace the exact same
- * cells (same renderer/hit-test pairing idea as the panel tables).
- * Line uses the raw endpoints; ellipse/triangle treat them as a bounding
- * box; curve is a quadratic Bezier bent toward control point (cx,cy),
- * drawn as short segments between dense samples so it can't leave gaps. */
+/* Emits every cell of a shape through plot callback, so live drag preview
+ * in render() and commit path in input.c trace exact same cells (same
+ * renderer/hit-test pairing idea as panel tables). Line uses raw endpoints;
+ * ellipse/triangle treat them as bounding box; curve is quadratic Bezier
+ * bent toward control point (cx,cy), drawn as short segments between dense
+ * samples so it can't leave gaps. */
 void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, int cy, TartPlotFn plot, void *ctx) {
     switch (tool) {
         case TOOL_LINE:
@@ -841,8 +829,8 @@ void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, in
             if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
             double ecx = (x0 + x1) / 2.0, ecy = (y0 + y1) / 2.0;
             double rx = (x1 - x0) / 2.0, ry = (y1 - y0) / 2.0;
-            /* Dense parametric sampling; cheap at canvas scale and immune to
-             * the axis special-casing a midpoint algorithm would need. */
+            /* Dense parametric sampling; cheap at canvas scale, immune to
+             * axis special-casing a midpoint algorithm would need. */
             int steps = (int)(8 * (rx + ry)) + 8;
             for (int i = 0; i < steps; i++) {
                 double a = 2.0 * M_PI * i / steps;
@@ -864,12 +852,12 @@ void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, in
     }
 }
 
-/* Bucket fill: repaints the 4-connected region of cells matching the start
- * cell's glyph+color with fill_char in current_color. Random mode instead
- * draws each cell from the palette category containing fill_char - a
- * texture fill (pick '.' for scattered punctuation, 'o' for shape glyphs);
- * clicking a random-filled region again re-rolls it. Pushes its own undo
- * entry, and only once it knows it will actually change something. */
+/* Bucket fill: repaints 4-connected region of cells matching start cell's
+ * glyph+color with fill_char in current_color. Random mode instead draws
+ * each cell from palette category containing fill_char — texture fill (pick
+ * '.' for scattered punctuation, 'o' for shape glyphs); clicking a
+ * random-filled region again re-rolls it. Pushes own undo entry, only once
+ * it knows it will actually change something. */
 void tart_flood_fill(App *app, int x, int y) {
     Canvas *c = tart_canvas(app);
     Viewport *vp = &app->viewport;
@@ -880,10 +868,10 @@ void tart_flood_fill(App *app, int x, int y) {
     unsigned char from_col = c->colors[y * w + x];
     if (!vp->fill_random && from_ch == vp->fill_char && from_col == vp->current_color) return;
 
-    /* Random mode rolls each cell from the palette category containing
-     * fill_char; chars in no category (like the default '#') would leave
-     * the set empty and quietly degrade to a fixed fill, so fall back to
-     * the Standard row - random must always visibly do something. */
+    /* Random mode rolls each cell from palette category containing
+     * fill_char; chars in no category (like default '#') would leave set
+     * empty and quietly degrade to fixed fill, so fall back to Standard
+     * row — random must always visibly do something. */
     const wchar_t *set = NULL;
     int set_len = 0;
     if (vp->fill_random) {
@@ -897,10 +885,10 @@ void tart_flood_fill(App *app, int x, int y) {
         set_len = (int)wcslen(set);
     }
 
-    /* Iterative fill with an explicit stack; visited[] (marked at push time)
-     * keeps every cell pushed at most once, which both bounds the stack at
-     * w*h and makes random re-rolls terminate even when a rolled glyph
-     * happens to equal the glyph being replaced. */
+    /* Iterative fill with explicit stack; visited[] (marked at push time)
+     * keeps every cell pushed at most once — bounds stack at w*h and makes
+     * random re-rolls terminate even when rolled glyph happens to equal
+     * glyph being replaced. */
     int *stack = malloc(sizeof(int) * (size_t)w * h);
     unsigned char *visited = calloc((size_t)w * h, 1);
     if (!stack || !visited) { free(stack); free(visited); return; }
@@ -928,55 +916,13 @@ void tart_flood_fill(App *app, int x, int y) {
     free(visited);
 }
 
-/* Standard HSL->RGB (h in [0,360), s/l in [0,100]), each output channel 0-255. */
-void tart_hsl_to_rgb(int h, int s, int l, int *r, int *g, int *b) {
-    double H = ((h % 360) + 360) % 360 / 360.0;
-    double S = s / 100.0, L = l / 100.0;
-    double C = (1.0 - fabs(2.0 * L - 1.0)) * S;
-    double Hp = H * 6.0;
-    double X = C * (1.0 - fabs(fmod(Hp, 2.0) - 1.0));
-    double r1, g1, b1;
-    if (Hp < 1)      { r1 = C; g1 = X; b1 = 0; }
-    else if (Hp < 2) { r1 = X; g1 = C; b1 = 0; }
-    else if (Hp < 3) { r1 = 0; g1 = C; b1 = X; }
-    else if (Hp < 4) { r1 = 0; g1 = X; b1 = C; }
-    else if (Hp < 5) { r1 = X; g1 = 0; b1 = C; }
-    else             { r1 = C; g1 = 0; b1 = X; }
-    double m = L - C / 2.0;
-    *r = (int)((r1 + m) * 255.0 + 0.5);
-    *g = (int)((g1 + m) * 255.0 + 0.5);
-    *b = (int)((b1 + m) * 255.0 + 0.5);
-}
-
-/* Quantizes to the nearest color in xterm's 216-color cube (indices 16-231),
- * using its actual (non-linear) per-channel level table. Skips the 16 base
- * ANSI colors (theme-dependent, not reliably RGB-mappable) and the 24-step
- * grayscale ramp - the 216-cube alone covers plenty of range for a first
- * pass and keeps quantization simple and predictable. */
-int tart_rgb_to_256(int r, int g, int b) {
-    static const int levels[6] = { 0, 95, 135, 175, 215, 255 };
-    int best_ri = 0, best_gi = 0, best_bi = 0, best_d;
-
-    best_d = 256;
-    for (int i = 0; i < 6; i++) { int d = abs(r - levels[i]); if (d < best_d) { best_d = d; best_ri = i; } }
-    best_d = 256;
-    for (int i = 0; i < 6; i++) { int d = abs(g - levels[i]); if (d < best_d) { best_d = d; best_gi = i; } }
-    best_d = 256;
-    for (int i = 0; i < 6; i++) { int d = abs(b - levels[i]); if (d < best_d) { best_d = d; best_bi = i; } }
-
-    return 16 + 36 * best_ri + 6 * best_gi + best_bi;
-}
-
-/* mvaddch only takes narrow chtypes; this is the one-cell wide-glyph
- * equivalent, used everywhere a box-drawing or canvas character lands on
- * screen. */
 static void tart_addwch(int y, int x, wchar_t wc) {
     mvaddnwstr(y, x, ((wchar_t[]){ wc, L'\0' }), 1);
 }
 
-/* Draws a solid single-line box outline; caller fills the interior and sets
+/* Draws solid single-line box outline; caller fills interior and sets
  * whatever color/attrs it wants around the call. Shared by every popup
- * (help overlay, char palette, color picker) so they can't drift apart. */
+ * (help overlay, char palette) — can't drift apart. */
 void tart_draw_box(int x, int y, int w, int h) {
     tart_addwch(y, x, L'┌');
     tart_addwch(y, x + w - 1, L'┐');
@@ -992,8 +938,8 @@ void tart_draw_box(int x, int y, int w, int h) {
     }
 }
 
-/* Plot callback for shape drag previews: draws the brush char directly on
- * screen (caller sets the dim/cyan attrs), clipped to the viewport. */
+/* Plot callback for shape drag previews: draws brush char directly on
+ * screen (caller sets dim/cyan attrs), clipped to viewport. */
 struct TartShapePreview { App *app; TartRect canvas_r; };
 static void tart_preview_plot(int wx, int wy, void *vctx) {
     struct TartShapePreview *p = vctx;
@@ -1023,16 +969,16 @@ void render(App *app) {
             attron(a);
             mvprintw(menu_r.y, mitems[i].x0, "%s", mitems[i].label);
             attroff(a);
-            /* Underline the Alt+<letter> mnemonic (always the first letter). */
+            /* Underline Alt+<letter> mnemonic (always first letter). */
             attron(a | A_UNDERLINE);
             mvprintw(menu_r.y, mitems[i].x0, "%c", mitems[i].label[0]);
             attroff(a | A_UNDERLINE);
         }
     }
 
-    /* X-ruler numbers every 10 world columns; their tick marks live on the
-     * canvas's top border below (the ┬ junctions), which occupies what would
-     * otherwise be the ruler's tick row. */
+    /* X-ruler numbers every 10 world columns; tick marks live on canvas's
+     * top border below (the ┬ junctions), occupying what would otherwise be
+     * ruler's tick row. */
     attron(COLOR_PAIR(4) | A_DIM);
     for (int wx = ((app->viewport.offset_x / 10) * 10) - 30; wx < app->viewport.offset_x + canvas_r.w + 30; wx += 10) {
         int screen_x = (wx - app->viewport.offset_x) + CANVAS_START_X;
@@ -1052,8 +998,8 @@ void render(App *app) {
     }
     attroff(COLOR_PAIR(4) | A_DIM);
 
-    /* Solid viewport frame. Top/bottom edges double as the ruler's tick row:
-     * a ┬/┴ junction every 10 world columns, aligned under the numbers above. */
+    /* Solid viewport frame. Top/bottom edges double as ruler's tick row:
+     * a ┬/┴ junction every 10 world columns, aligned under numbers above. */
     attron(COLOR_PAIR(4));
     for (int x = 0; x < canvas_r.w; x++) {
         int world_x = x + app->viewport.offset_x;
@@ -1071,13 +1017,13 @@ void render(App *app) {
     tart_addwch(canvas_r.y + canvas_r.h, canvas_r.x + canvas_r.w, L'┘');
     attroff(COLOR_PAIR(4));
 
-    /* Pencil/eraser get a live outline of their actual size+shape footprint
-     * around the cursor; other tools have their own drag preview below. */
+    /* Pencil/eraser get live outline of actual size+shape footprint around
+     * cursor; other tools have their own drag preview below. */
     bool show_brush_outline = (app->viewport.tool == TOOL_PENCIL || app->viewport.tool == TOOL_ERASER);
     int brush_sz = (app->viewport.tool == TOOL_ERASER) ? app->viewport.eraser_size : app->viewport.brush_size;
     BrushShape brush_shp = (app->viewport.tool == TOOL_ERASER) ? app->viewport.eraser_shape : app->viewport.brush_shape;
     /* Tools that actually paint with current_color; eraser always clears to
-     * color 0 regardless, so previewing current_color there would mislead. */
+     * color 0 regardless — previewing current_color there would mislead. */
     bool tool_uses_color = (app->viewport.tool != TOOL_ERASER &&
                             app->viewport.tool != TOOL_SELECT &&
                             app->viewport.tool != TOOL_MOVE);
@@ -1096,7 +1042,7 @@ void render(App *app) {
                 unsigned char cell_color;
                 ch_to_draw = tart_composite(app, app->cur_frame, world_x, world_y, &cell_color);
                 if (cell_color != 0) color_pair = 16 + cell_color;
-                /* Onion skin: where this frame is blank, ghost the previous
+                /* Onion skin: where this frame is blank, ghost previous
                  * frame's composite in dim monochrome. */
                 if (ch_to_draw == L' ' && app->onion && !app->playing && app->frame_count > 1) {
                     int prev = (app->cur_frame + app->frame_count - 1) % app->frame_count;
@@ -1119,14 +1065,14 @@ void render(App *app) {
                                     brush_sz, brush_shp)) {
                 attrs = (attrs & ~A_DIM) | A_BOLD;
                 color_pair = 1;
-                /* A blank cell has no ink to tint, so the outline would be
-                 * invisible over untouched canvas - give it a visible dot
-                 * there instead of silently doing nothing. */
+                /* Blank cell has no ink to tint — outline would be invisible
+                 * over untouched canvas; give it a visible dot there instead
+                 * of silently doing nothing. */
                 if (ch_to_draw == L' ') ch_to_draw = L'.';
             }
 
-            /* Selection stays outlined on the canvas as long as it's held,
-             * regardless of which tool is active now - otherwise it becomes
+            /* Selection stays outlined on canvas as long as it's held,
+             * regardless of which tool is active now — otherwise it becomes
              * invisible the instant you release the Select drag. */
             if (app->viewport.has_selection &&
                 tart_rect_outline(world_x, world_y, app->viewport.sel_origin_wx, app->viewport.sel_origin_wy,
@@ -1136,11 +1082,10 @@ void render(App *app) {
                 if (ch_to_draw == L' ') ch_to_draw = L'.';
             }
 
-            /* The exact cell under the cursor previews what a click would
-             * actually do: reversed as before, but also tinted to the color
-             * that would be painted, taking priority over the outline's
-             * generic cyan hint on the degenerate size-1 case where they
-             * coincide. */
+            /* Exact cell under cursor previews what a click would actually
+             * do: reversed as before, but also tinted to color that would
+             * be painted, taking priority over outline's generic cyan hint
+             * on degenerate size-1 case where they coincide. */
             if (is_cursor) {
                 attrs |= A_REVERSE;
                 if (tool_uses_color && app->viewport.current_color != 0) {
@@ -1155,11 +1100,10 @@ void render(App *app) {
         }
     }
 
-    /* Shape tools preview through the same tart_shape_points that will
-     * commit them, so the preview can never lie about the final cells.
-     * The curve previews in both stages: a straight baseline while its
-     * endpoints are dragged out, then the live bend while the control
-     * point follows the cursor. */
+    /* Shape tools preview through same tart_shape_points that will commit
+     * them — preview can never lie about final cells. Curve previews in
+     * both stages: straight baseline while endpoints are dragged out, then
+     * live bend while control point follows cursor. */
     {
         Viewport *vp = &app->viewport;
         bool shape_drag = vp->tool_dragging &&
@@ -1240,9 +1184,9 @@ void render(App *app) {
     } else if (app->viewport.prompt_mode != PROMPT_NONE) {
         tart_draw_prompt(app, status_r);
     } else {
-        /* Same dark chrome as the command-input line (tart_draw_command_palette),
-         * so the bottom row reads as one persistent command/status area
-         * whether or not you're actively typing a command. */
+        /* Same dark chrome as command-input line (tart_draw_command_palette)
+         * — bottom row reads as one persistent command/status area whether
+         * or not you're actively typing a command. */
         const char *mode_badge = (app->viewport.mode == 'n') ? " NORMAL " : " PAN ";
         int cx = status_r.x;
 
@@ -1286,17 +1230,6 @@ void render(App *app) {
         attroff(COLOR_PAIR(5));
         cx += 18;
 
-        {
-            char fl[32];
-            int len = snprintf(fl, sizeof(fl), "frm %d/%d lyr %d/%d",
-                               app->cur_frame + 1, app->frame_count,
-                               app->cur_layer + 1, app->layer_count);
-            attron(COLOR_PAIR(5));
-            mvprintw(status_r.y, cx, "%s", fl);
-            attroff(COLOR_PAIR(5));
-            cx += len + 1;
-        }
-
         const char *hint = ": commands   ?/F1 help   q quit";
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
         if (hint_x > cx) {
@@ -1314,9 +1247,6 @@ void render(App *app) {
         tart_draw_palette(app);
     }
 
-    if (app->viewport.color_picker_visible) {
-        tart_draw_color_picker(app);
-    }
 
     if (app->viewport.help_visible) {
         tart_draw_help_overlay(app);
@@ -1333,9 +1263,9 @@ void render(App *app) {
     refresh();
 }
 
-/* Undo/redo history viewer: the timeline drawn oldest-first, a "now" marker
- * between the undo (past) and redo (future) stacks. It's live - Up/Down in
- * input.c actually run undo/redo while it's open, moving the marker. */
+/* Undo/redo history viewer: timeline drawn oldest-first, "now" marker
+ * between undo (past) and redo (future) stacks. Live — Up/Down in input.c
+ * actually run undo/redo while it's open, moving the marker. */
 void tart_draw_history_overlay(App *app) {
     enum { SHOW_MAX = 10 };   /* per side; older/further entries summarized */
     int u_show = app->undo_count > SHOW_MAX ? SHOW_MAX : app->undo_count;
@@ -1377,7 +1307,7 @@ void tart_draw_history_overlay(App *app) {
     attron(A_BOLD | COLOR_PAIR(1));
     mvprintw(line++, x + 2, "--- now ---");
     attroff(A_BOLD | COLOR_PAIR(1));
-    /* Redo entries are the future: nearest (next redo) first, dimmed. */
+    /* Redo entries are future: nearest (next redo) first, dimmed. */
     attron(A_DIM);
     for (int i = app->redo_count - 1; i >= app->redo_count - r_show; i--) {
         TartUndoState *s = &app->redo_stack[i];
@@ -1399,7 +1329,7 @@ static const TartCommand *tart_find_command(const char *name) {
 
 /* True if every character of query appears in text in order (case-
  * insensitive), e.g. "rsz" matches "resize". Lower score = tighter match:
- * each character skipped between two matched letters costs one point, so
+ * each character skipped between two matched letters costs one point —
  * contiguous/prefix matches naturally sort above scattered ones. */
 static bool tart_fuzzy_score(const char *text, const char *query, int *out_score) {
     if (!*query) { *out_score = 0; return true; }
@@ -1423,9 +1353,9 @@ static bool tart_fuzzy_score(const char *text, const char *query, int *out_score
 }
 
 /* Fuzzy-filters TART_COMMANDS against query (matching name or alias),
- * writing matches into match_idx best-first. Shared by the command-palette
- * renderer and its Up/Down/Enter handling in input.c so they always agree
- * on what "the Nth match" means. */
+ * writing matches into match_idx best-first. Shared by command-palette
+ * renderer and its Up/Down/Enter handling in input.c — always agree on
+ * what "the Nth match" means. */
 int tart_command_matches(const char *query, int match_idx[TART_COMMAND_COUNT]) {
     int scores[TART_COMMAND_COUNT];
     int count = 0;
@@ -1457,13 +1387,13 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
     int n = 0;
 
     rows[n++] = (TartPanelRow){ TP_ROW_PENCIL,  -1, -1, PANEL_SELECT_TOOL, TOOL_PENCIL };
+    rows[n++] = (TartPanelRow){ TP_ROW_ERASER,  -1, -1, PANEL_SELECT_TOOL, TOOL_ERASER };
     rows[n++] = (TartPanelRow){ TP_ROW_LINE,    -1, -1, PANEL_SELECT_TOOL, TOOL_LINE };
     rows[n++] = (TartPanelRow){ TP_ROW_CURVE,   -1, -1, PANEL_SELECT_TOOL, TOOL_CURVE };
     rows[n++] = (TartPanelRow){ TP_ROW_RECT,    -1, -1, PANEL_SELECT_TOOL, TOOL_RECT };
     rows[n++] = (TartPanelRow){ TP_ROW_ELLIPSE, -1, -1, PANEL_SELECT_TOOL, TOOL_ELLIPSE };
     rows[n++] = (TartPanelRow){ TP_ROW_TRI,     -1, -1, PANEL_SELECT_TOOL, TOOL_TRI };
     rows[n++] = (TartPanelRow){ TP_ROW_FILL,    -1, -1, PANEL_SELECT_TOOL, TOOL_FILL };
-    rows[n++] = (TartPanelRow){ TP_ROW_ERASER,  -1, -1, PANEL_SELECT_TOOL, TOOL_ERASER };
     rows[n++] = (TartPanelRow){ TP_ROW_SELECT,  -1, -1, PANEL_SELECT_TOOL, TOOL_SELECT };
     rows[n++] = (TartPanelRow){ TP_ROW_MOVE,    -1, -1, PANEL_SELECT_TOOL, TOOL_MOVE };
 
@@ -1500,28 +1430,23 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
         int x = TP_COLOR_SLIDER_DOT_X0 + i;
         rows[n++] = (TartPanelRow){ TP_ROW_COLOR, x, x, PANEL_COLOR_SET, i };
     }
-    rows[n++] = (TartPanelRow){ TP_ROW_COLOR, -1, -1, PANEL_COLOR_OPEN, 0 };
     return n;
 }
 
 void tart_draw_tool_panel(App *app, TartRect tool_r) {
     Viewport *vp = &app->viewport;
 
-    attron(A_BOLD);
-    mvprintw(tool_r.y + TP_ROW_TOOLS_HEADER, tool_r.x + 1, "Tools");
-    attroff(A_BOLD);
-
     static const struct { int row; const char *label; TartTool tool; char key; } tools[] = {
         { TP_ROW_PENCIL,  "Draw",     TOOL_PENCIL,  'd' },
+        { TP_ROW_ERASER,  "Eraser",   TOOL_ERASER,  'e' },
         { TP_ROW_LINE,    "Line",     TOOL_LINE,    'L' },
         { TP_ROW_CURVE,   "Curve",    TOOL_CURVE,   'C' },
         { TP_ROW_RECT,    "Rect",     TOOL_RECT,    'r' },
         { TP_ROW_ELLIPSE, "Ellipse",  TOOL_ELLIPSE, 'E' },
         { TP_ROW_TRI,     "Triangle", TOOL_TRI,     'T' },
-        { TP_ROW_FILL,    "Fill",     TOOL_FILL,    'F' },
-        { TP_ROW_ERASER,  "Eraser",   TOOL_ERASER,  'e' },
+        { TP_ROW_FILL,    "Fill",     TOOL_FILL,    'f' },
         { TP_ROW_SELECT,  "Select",   TOOL_SELECT,  's' },
-        { TP_ROW_MOVE,    "Move",     TOOL_MOVE,    'm' },
+        { TP_ROW_MOVE,    "Move",     TOOL_MOVE,    'v' },
     };
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
         bool sel = (vp->tool == tools[i].tool);
@@ -1529,10 +1454,10 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attron(a);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
         attroff(a);
-        /* Underline the actual bound key, not just the label's literal first
-         * letter - Eraser (e) and Ellipse (E) both start with the same
-         * printable letter but differ by case, so label[0] alone can't tell
-         * them apart on screen. */
+        /* Underline the actual bound key, not just label's literal first
+         * letter — Eraser (e) and Ellipse (E) both start with same printable
+         * letter but differ by case, so label[0] alone can't tell them
+         * apart on screen. */
         attron(a | A_UNDERLINE);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%c", tools[i].key);
         attroff(a | A_UNDERLINE);
@@ -1562,7 +1487,7 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, vp->curve_pending ? "Click sets bend" : "Drag ends first");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
     } else if (vp->tool == TOOL_RECT) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (f)", vp->rect_filled ? "on" : "off");
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (F)", vp->rect_filled ? "on" : "off");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
     } else if (vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag bounding box");
@@ -1570,7 +1495,7 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     } else if (vp->tool == TOOL_FILL) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Click fills region");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->fill_char);
-        mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Random: %s (f)", vp->fill_random ? "on" : "off");
+        mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Random: %s (F)", vp->fill_random ? "on" : "off");
     } else if (vp->tool == TOOL_ERASER) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Size:%d  -  =", vp->eraser_size);
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Shape: %s", vp->eraser_shape == BRUSH_ROUND ? "round" : "square");
@@ -1583,9 +1508,9 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     }
 
     /* Size slider (pencil/eraser only): "-[dots]= NN", each dot a stop in
-     * TART_BRUSH_SIZES, current one solid; the '-'/'=' bracketing chars are
-     * literally the keys that step through it one stop at a time, while
-     * clicking a dot jumps straight to that size. */
+     * TART_BRUSH_SIZES, current one solid; '-'/'=' bracketing chars are
+     * literally the keys that step through it one stop at a time, clicking
+     * a dot jumps straight to that size. */
     if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
         int size = (vp->tool == TOOL_ERASER) ? vp->eraser_size : vp->brush_size;
         int idx = 0;
@@ -1603,11 +1528,10 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         mvprintw(tool_r.y + TP_ROW_SIZE_SLIDER, tool_r.x + TP_SIZE_SLIDER_DOT_X0 + (int)TART_BRUSH_SIZE_COUNT + 1, "=%2d", size);
     }
 
-    /* Color slider: same idea as the size slider, but each dot is drawn in
-     * its own basic color so the row doubles as a mini legend. '['/']'
-     * step it one stop at a time; clicking a dot jumps straight to it;
-     * clicking anywhere else on the row opens the full HSL picker. */
-    mvprintw(tool_r.y + TP_ROW_COLOR, tool_r.x + 1, "Color [");
+    /* Color slider: same idea as size slider, but each dot drawn in its own
+     * quick color — row doubles as mini legend. '['/']' step it one stop at
+     * a time; clicking a dot jumps straight to it. */
+    mvprintw(tool_r.y + TP_ROW_COLOR, tool_r.x + 1, "Color[");
     for (int i = 0; i < (int)TART_BASIC_COLOR_COUNT; i++) {
         bool cur = (i == vp->quick_color_idx);
         attr_t a = COLOR_PAIR(16 + TART_BASIC_COLORS[i]) | (cur ? (A_BOLD | A_REVERSE) : A_DIM);
@@ -1618,8 +1542,8 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     mvaddch(tool_r.y + TP_ROW_COLOR, tool_r.x + TP_COLOR_SLIDER_DOT_X0 + (int)TART_BASIC_COLOR_COUNT, ']');
 }
 
-/* Appends one anim-bar item at *x with a two-space gap. disp_w is on-screen
- * width, which differs from strlen for the UTF-8 │ separators. */
+/* Appends one anim-bar item at *x with two-space gap. disp_w is on-screen
+ * width, differs from strlen for UTF-8 │ separators. */
 static int tart_anim_append(TartAnimItem *items, int n, int *x, const char *label, int disp_w, TartAnimAction action) {
     items[n] = (TartAnimItem){ label, *x, *x + disp_w - 1, action };
     *x += disp_w + 2;
@@ -1716,9 +1640,9 @@ void tart_draw_menu_dropdown(App *app, TartRect menu_r) {
     attroff(COLOR_PAIR(5));
 }
 
-/* The verb being matched is only the part of the buffer before the first
- * space - once a space is typed the rest is a command argument (a filename
- * for save/load, WxH for resize), not more of the fuzzy query. */
+/* Verb being matched is only part of buffer before first space — once a
+ * space is typed rest is a command argument (filename for save/load, WxH
+ * for resize), not more of fuzzy query. */
 void tart_command_verb(const char *buf, char *out, size_t out_sz) {
     const char *sp = strchr(buf, ' ');
     size_t vlen = sp ? (size_t)(sp - buf) : strlen(buf);
@@ -1863,77 +1787,9 @@ void tart_draw_palette(App *app) {
     attroff(COLOR_PAIR(2));
 }
 
-void tart_compute_color_picker_geom(int *out_x, int *out_y, int *out_w, int *out_h, int *out_bar_x, int *out_bar_w) {
-    int w = 66;
-    int h = 12;
-    int x = (COLS - w) / 2;
-    int y = (LINES - h) / 2;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    *out_x = x;
-    *out_y = y;
-    *out_w = w;
-    *out_h = h;
-    *out_bar_x = x + 9;
-    *out_bar_w = 50;
-}
-
-void tart_draw_color_picker(App *app) {
-    Viewport *vp = &app->viewport;
-    int x, y, w, h, bar_x, bar_w;
-    tart_compute_color_picker_geom(&x, &y, &w, &h, &bar_x, &bar_w);
-
-    attron(COLOR_PAIR(2));
-    for (int row = 0; row < h; row++) mvprintw(y + row, x, "%*s", w, "");
-    tart_draw_box(x, y, w, h);
-    attron(A_BOLD);
-    mvprintw(y + 1, x + 2, "Color Picker");
-    attroff(A_BOLD | COLOR_PAIR(2));
-
-    static const char *labels[3] = { "Hue  ", "Sat  ", "Light" };
-    for (int slider = 0; slider < 3; slider++) {
-        int row_y = y + 3 + slider;
-        bool focused = (vp->color_slider_focus == slider);
-        attron(focused ? A_BOLD : A_NORMAL);
-        mvprintw(row_y, x + 2, "%s", labels[slider]);
-        attroff(focused ? A_BOLD : A_NORMAL);
-
-        int value = (slider == 0) ? vp->hsl_h : (slider == 1) ? vp->hsl_s : vp->hsl_l;
-        int max_v = (slider == 0) ? 360 : 100;
-        for (int i = 0; i < bar_w; i++) {
-            int h2 = (slider == 0) ? (i * 360 / bar_w) : vp->hsl_h;
-            int s2 = (slider == 1) ? (i * 100 / bar_w) : vp->hsl_s;
-            int l2 = (slider == 2) ? (i * 100 / bar_w) : vp->hsl_l;
-            int r, g, b;
-            tart_hsl_to_rgb(h2, s2, l2, &r, &g, &b);
-            int idx = tart_rgb_to_256(r, g, b);
-            attron(COLOR_PAIR(16 + idx));
-            mvaddch(row_y, bar_x + i, '#');
-            attroff(COLOR_PAIR(16 + idx));
-        }
-        int marker_x = bar_x + (value * (bar_w - 1) / max_v);
-        attron(A_REVERSE);
-        mvaddch(row_y, marker_x, ' ');
-        attroff(A_REVERSE);
-        mvprintw(row_y, bar_x + bar_w + 2, "%3d", value);
-    }
-
-    attron(COLOR_PAIR(2));
-    mvprintw(y + 7, x + 2, "Preview:");
-    int r, g, b;
-    tart_hsl_to_rgb(vp->hsl_h, vp->hsl_s, vp->hsl_l, &r, &g, &b);
-    int idx = tart_rgb_to_256(r, g, b);
-    bool swatch_focused = (vp->color_slider_focus == 3);
-    attron(COLOR_PAIR(16 + idx) | (swatch_focused ? A_REVERSE : A_NORMAL));
-    mvprintw(y + 7, x + 11, "        ");
-    attroff(COLOR_PAIR(16 + idx) | (swatch_focused ? A_REVERSE : A_NORMAL));
-
-    mvprintw(y + 9, x + 2, "Tab/click bar focus, drag or arrows to adjust, Enter/click swatch = confirm, Esc cancel");
-    attroff(COLOR_PAIR(2));
-}
 
 /* Resizes one canvas in place, preserving overlapping content. On alloc
- * failure the canvas is untouched. */
+ * failure canvas is untouched. */
 static bool tart_canvas_resize(Canvas *c, int new_w, int new_h) {
     wchar_t *new_cells = malloc(sizeof(wchar_t) * (size_t)new_w * new_h);
     unsigned char *new_colors = malloc((size_t)new_w * new_h);
@@ -1957,10 +1813,10 @@ static bool tart_canvas_resize(Canvas *c, int new_w, int new_h) {
     return true;
 }
 
-/* Every frame/layer canvas keeps identical dimensions (the compositor
- * depends on it), so resize walks the whole document; on a mid-walk alloc
- * failure the already-resized canvases are put back to the old size before
- * returning, keeping the invariant. */
+/* Every frame/layer canvas keeps identical dimensions (compositor depends
+ * on it) — resize walks whole document; on mid-walk alloc failure, already-
+ * resized canvases put back to old size before returning, keeping the
+ * invariant. */
 bool tart_resize_doc(App *app, int new_w, int new_h) {
     if (new_w < 1) new_w = 1;
     if (new_h < 1) new_h = 1;
@@ -1985,6 +1841,40 @@ bool tart_resize_doc(App *app, int new_w, int new_h) {
     return true;
 }
 
+/* Discards open document and its undo history, replaces it with one blank
+ * frame/layer at default size — same shape as tart_load_doc minus the file.
+ * Selection state cleared — it points at buffers sized for document that's
+ * about to go away. */
+bool tart_new_doc(App *app) {
+    Canvas blank;
+    if (!init_canvas(&blank, TART_DEFAULT_CANVAS_WIDTH, TART_DEFAULT_CANVAS_HEIGHT)) return false;
+
+    for (int f = 0; f < app->frame_count; f++)
+        for (int l = 0; l < app->layer_count; l++)
+            cleanup_canvas(&app->frames[f].layers[l]);
+    memset(app->frames, 0, sizeof(app->frames));
+    app->frames[0].layers[0] = blank;
+
+    app->frame_count = 1;
+    app->layer_count = 1;
+    app->cur_frame = 0;
+    app->cur_layer = 0;
+    app->width = TART_DEFAULT_CANVAS_WIDTH;
+    app->height = TART_DEFAULT_CANVAS_HEIGHT;
+    app->fps = 8;
+    app->playing = false;
+    app->onion = false;
+
+    free(app->viewport.sel_buffer);
+    free(app->viewport.sel_colors);
+    app->viewport.sel_buffer = NULL;
+    app->viewport.sel_colors = NULL;
+    app->viewport.has_selection = false;
+
+    tart_undo_clear(app);
+    return true;
+}
+
 /* .tart format, plain text throughout:
  *
  *   <width> <height> [fps]
@@ -1996,7 +1886,7 @@ bool tart_resize_doc(App *app, int new_w, int new_h) {
  *   FRAME                                next frame (restarts at layer 1)
  *   <rows...>
  *
- * A v1 file (no fps, no markers) is exactly one frame of one layer, and a
+ * v1 file (no fps, no markers) is exactly one frame of one layer; a
  * one-frame one-layer save is a valid v1 file plus the fps field. */
 
 static void tart_skip_line(FILE *f) {
@@ -2004,9 +1894,8 @@ static void tart_skip_line(FILE *f) {
     while ((wc = fgetwc(f)) != WEOF && wc != L'\n') {}
 }
 
-/* Reads c->height glyph rows starting at the current position (which must be
- * the start of a row). Short rows stay blank-padded; overlong rows are
- * clipped to c->width. */
+/* Reads c->height glyph rows starting at current position (must be start of
+ * a row). Short rows stay blank-padded; overlong rows clipped to c->width. */
 static void tart_read_rows(FILE *f, Canvas *c) {
     for (int y = 0; y < c->height; y++) {
         int x = 0;
@@ -2067,8 +1956,8 @@ bool tart_load_doc(App *app, const char *path) {
         return false;
     }
 
-    /* Optional fps rides the header line; parse only up to the newline
-     * because %d would happily skip into the first glyph row. */
+    /* Optional fps rides header line; parse only up to newline — %d would
+     * happily skip into first glyph row. */
     int fps = 8;
     {
         wchar_t rest[32];
@@ -2082,8 +1971,8 @@ bool tart_load_doc(App *app, const char *path) {
         if (swscanf(rest, L"%d", &v) == 1 && v >= 1 && v <= 60) fps = v;
     }
 
-    /* Stage the whole document before touching app, so a malformed or
-     * partially-read file can't destroy the open one. */
+    /* Stage whole document before touching app — malformed or partially-
+     * read file can't destroy the open one. */
     static Frame frames[MAX_FRAMES];
     memset(frames, 0, sizeof(frames));
     int cur_f = 0, cur_l = 0, max_layers = 1;
@@ -2114,8 +2003,8 @@ bool tart_load_doc(App *app, const char *path) {
     }
     fclose(f);
 
-    /* The format allows ragged layer counts; pad every frame to the max so
-     * the uniform-layers invariant holds. */
+    /* Format allows ragged layer counts; pad every frame to max so
+     * uniform-layers invariant holds. */
     int fcount = cur_f + 1;
     for (int fi = 0; ok && fi < fcount; fi++)
         for (int li = 0; ok && li < max_layers; li++)
@@ -2146,7 +2035,6 @@ bool tart_load_doc(App *app, const char *path) {
 }
 
 void tart_draw_help_overlay(App *app) {
-    (void)app;
     const char *lines[] = {
         "TART - Terminal ASCII Rendering Tool",
         "",
@@ -2154,36 +2042,36 @@ void tart_draw_help_overlay(App *app) {
         "",
         "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
-        "View    v toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
-        "Tools   d draw   e eraser   r rect   s select   m move (underlined letter)",
+        "View    m toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
+        "Tools   d draw   e eraser   r rect   s select   v move (underlined letter)",
         "Shapes  L line   C curve   E ellipse   T triangle - drag to place;",
         "        curve: drag the endpoints, then move to bend, click to set;",
         "        ellipse/triangle fit the dragged box (cells are ~2:1, so a",
         "        round-looking circle needs a box about twice as wide as tall)",
-        "Fill    F bucket fill - click repaints the connected region with the",
-        "        fill char; f toggles random texture mode (each cell rolls a",
+        "Fill    f bucket fill - click repaints the connected region with the",
+        "        fill char; F toggles random texture mode (each cell rolls a",
         "        glyph from the fill char's palette row; click again re-rolls)",
         "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
-        "        f rect fill toggle",
+        "        F rect fill toggle",
         "Select  drag to select (stays outlined); Move: drag to stamp a copy,",
         "        repeatable by default - c toggles cut mode (clears source, one-shot)",
         "Draw    left-click hold to use tool   space+move = alt draw/pan   Esc cancels",
         "Edit    u undo   U redo   H history viewer (Up/Down walk the timeline)",
         "        one step per stroke/stamp; frame, layer, resize, load reset it",
-        "Color   [ ] cycle 8 quick colors   click Color row for full HSL picker",
-        "Anim    n/N next/prev frame   a add blank   A duplicate   x delete",
+        "Color   [ ] cycle quick colors (white gray roygbiv black)   click a dot to jump",
+        "Anim    < > prev/next frame   a add blank   A duplicate   x delete",
         "        Enter play/stop   o onion skin (ghost of previous frame)   :fps N",
         "Layer   { } prev/next   Layer menu or :layer-add / :layer-del",
         "        space is transparent - lower layers show through; edits hit the",
         "        active layer only (see the anim bar / status readout)",
         "Image   Image menu > Resize Canvas (WxH) - resizes every frame and layer",
-        "File    File menu > Save/Load, or :save <name> / :load <name>",
+        "File    File menu > New/Save/Load, or :new / :save <name> / :load <name>",
         "Menu    Alt+F/E/V/I/A/L/H or click to open, arrows to move, Enter, Esc closes",
         "Cmd     : or Ctrl+E, fuzzy-searches as you type, Up/Down or wheel to pick,",
         "          Enter or click a row to run (save, load, resize, play, fps,",
         "          frame-add/dup/del, layer-add/del, onion, deselect, quit, ...)",
         "",
-        "Press any key to close",
+        "Up/Down/PgUp/PgDn scroll   any other key closes",
     };
     int n = (int)(sizeof(lines) / sizeof(lines[0]));
 
@@ -2193,7 +2081,18 @@ void tart_draw_help_overlay(App *app) {
         if (l > w) w = l;
     }
     w += 4;
+
+    /* Box shrinks to terminal; content taller than the box scrolls on
+     * help_scroll (clamped here — input side just adds deltas blindly). */
     int h = n + 2;
+    if (h > LINES) h = LINES;
+    int vis = h - 2;
+    int max_scroll = n - vis;
+    if (max_scroll < 0) max_scroll = 0;
+    if (app->viewport.help_scroll < 0) app->viewport.help_scroll = 0;
+    if (app->viewport.help_scroll > max_scroll) app->viewport.help_scroll = max_scroll;
+    int off = app->viewport.help_scroll;
+
     int x = (COLS - w) / 2;
     int y = (LINES - h) / 2;
     if (x < 0) x = 0;
@@ -2204,9 +2103,12 @@ void tart_draw_help_overlay(App *app) {
         mvprintw(y + row, x, "%*s", w, "");
     }
     tart_draw_box(x, y, w, h);
-    for (int i = 0; i < n; i++) {
-        mvprintw(y + 1 + i, x + 2, "%s", lines[i]);
+    for (int i = 0; i < vis && off + i < n; i++) {
+        mvprintw(y + 1 + i, x + 2, "%s", lines[off + i]);
     }
+    /* Scroll arrows on right border when more content sits off-box. */
+    if (off > 0) mvprintw(y, x + w - 3, "↑");
+    if (off < max_scroll) mvprintw(y + h - 1, x + w - 3, "↓");
     attroff(COLOR_PAIR(2));
 }
 

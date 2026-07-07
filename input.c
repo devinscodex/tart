@@ -17,21 +17,21 @@ static int tart_cycle_size(int size, int dir) {
     return TART_BRUSH_SIZES[idx];
 }
 
-/* A half-built shape gesture (drag in progress, curve waiting for its bend
- * click, a pencil/eraser stroke's undo entry still open) must not survive a
- * tool change, an Esc, or a frame/layer jump - otherwise it either commits
- * with the wrong tool's semantics or lands on a canvas the user isn't
- * looking at anymore. Every place that can interrupt a gesture funnels
- * through here so none of them can forget a field the others reset. */
+/* Half-built shape gesture (drag in progress, curve waiting for its bend
+ * click, pencil/eraser stroke's undo entry still open) must not survive a
+ * tool change, an Esc, or a frame/layer jump — otherwise it either commits
+ * with wrong tool's semantics or lands on a canvas user isn't looking at
+ * anymore. Every place that can interrupt a gesture funnels through here
+ * so none of them can forget a field the others reset. */
 static void tart_cancel_gesture(Viewport *vp) {
     vp->tool_dragging = false;
     vp->curve_pending = false;
     vp->stroke_open = false;
 }
 
-/* Executes whatever a tool-panel row (or its keyboard equivalent) does. The
- * size/shape actions apply to whichever of brush_size/eraser_size is active
- * for the current tool, so pencil and eraser keep independent settings. */
+/* Executes whatever a tool-panel row (or its keyboard equivalent) does.
+ * Size/shape actions apply to whichever of brush_size/eraser_size is active
+ * for current tool — pencil and eraser keep independent settings. */
 static void tart_apply_panel_action(App *app, TartPanelAction action, int value) {
     Viewport *vp = &app->viewport;
     switch (action) {
@@ -72,10 +72,6 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
         case PANEL_FILL_RANDOM_TOGGLE:
             vp->fill_random = !vp->fill_random;
             break;
-        case PANEL_COLOR_OPEN:
-            vp->color_picker_visible = true;
-            vp->color_slider_focus = 0;
-            break;
         case PANEL_COLOR_SET:
             if (value >= 0 && value < (int)TART_BASIC_COLOR_COUNT) {
                 vp->quick_color_idx = value;
@@ -96,11 +92,11 @@ static int tart_menu_mnemonic_index(int c) {
     return -1;
 }
 
-/* Every vim-motion key moves vim_cursor_x/y then re-syncs the mouse-cursor
- * shadow used for rendering the highlighted cell, and flags that the
- * viewport may need to scroll to keep it in view. Clamped to the canvas
- * plus the same PAN_VOID_MARGIN the view itself can pan into - vim motions
- * can wander into the dotted "void", just not endlessly. */
+/* Every vim-motion key moves vim_cursor_x/y then re-syncs mouse-cursor
+ * shadow used for rendering highlighted cell, flags that viewport may need
+ * to scroll to keep it in view. Clamped to canvas plus same PAN_VOID_MARGIN
+ * the view itself can pan into — vim motions can wander into dotted
+ * "void", just not endlessly. */
 static void tart_move_cursor(App *app, bool *moved) {
     Viewport *vp = &app->viewport;
     int x_lo = -PAN_VOID_MARGIN;
@@ -143,7 +139,7 @@ static void tart_deselect(App *app) {
     vp->has_selection = false;
 }
 
-/* Bound panning to "canvas plus a small margin of void" - shared by the
+/* Bound panning to "canvas plus a small margin of void" — shared by
  * end-of-frame clamp in handle_input and anything that changes canvas
  * dimensions (resize, load), since either can leave offset_x/y stale. */
 static void tart_clamp_view(App *app) {
@@ -184,11 +180,11 @@ static long tart_now_ms(void) {
 }
 
 /* Single dispatch point for every animation-bar action, shared by its click
- * hit-test, the equivalent keys (n/N a A x { } Enter o), the Anim/Layer
- * menus, and the ':' commands. */
+ * hit-test, equivalent keys (< > a A x { } Enter o), Anim/Layer menus, and
+ * ':' commands. */
 static void tart_anim_action(App *app, TartAnimAction action) {
     /* Frame/layer navigation can happen mid-drag (mouse and keyboard are
-     * independent input sources); a gesture that started on one frame/layer
+     * independent input sources); gesture that started on one frame/layer
      * must not commit onto whichever one is active when it finally closes. */
     tart_cancel_gesture(&app->viewport);
     switch (action) {
@@ -211,11 +207,11 @@ static void tart_anim_action(App *app, TartAnimAction action) {
     }
 }
 
-/* Single dispatch point for every named command, reached from the menu bar,
- * the ':' palette, and Alt+letter menu selection alike - arg is the text
- * after the command's first space (e.g. a filename or "WxHeight"), or NULL
- * when none was given, in which case save/load/resize fall back to opening
- * their own prompt instead. */
+/* Single dispatch point for every named command, reached from menu bar,
+ * ':' palette, and Alt+letter menu selection alike — arg is text after
+ * command's first space (e.g. a filename or "WxHeight"), or NULL when none
+ * given, in which case save/load/resize fall back to opening their own
+ * prompt instead. */
 static void tart_execute_command(App *app, const char *name, const char *arg) {
     if (strcmp(name, "quit") == 0) {
         app->running = 0;
@@ -243,6 +239,8 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         } else {
             tart_open_prompt(app, PROMPT_RESIZE, "");
         }
+    } else if (strcmp(name, "new") == 0) {
+        if (tart_new_doc(app)) tart_clamp_view(app);
     } else if (strcmp(name, "save") == 0) {
         if (arg) tart_save_doc(app, arg);
         else tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
@@ -273,9 +271,9 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
     }
 }
 
-/* Rect tool: drag from press to release defines the rectangle, stamped onto
- * the canvas only on release (drag_start/drag_cur meanwhile drive the live
- * dashed preview drawn in render()). */
+/* Rect tool: drag from press to release defines rectangle, stamped onto
+ * canvas only on release (drag_start/drag_cur meanwhile drive live dashed
+ * preview drawn in render()). */
 static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
     if (left_press) {
@@ -310,7 +308,7 @@ static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_
 }
 
 /* Select tool: drag a rectangle; on release, copy its cells+colors into
- * sel_buffer/sel_colors so the move tool has something to stamp elsewhere. */
+ * sel_buffer/sel_colors so move tool has something to stamp elsewhere. */
 static void tart_tool_select(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
     if (left_press) {
@@ -349,10 +347,10 @@ static void tart_tool_select(App *app, int wx, int wy, bool left_press, bool lef
 }
 
 /* Move tool: needs an existing selection (from tart_tool_select); dragging
- * previews the buffer following the cursor. In stamp mode (default,
- * move_cut == false) release pastes a copy and the selection stays put -
- * repeatable, source untouched. In cut mode release also clears the
- * source region and drops the selection - a one-shot true move. */
+ * previews buffer following cursor. In stamp mode (default, move_cut ==
+ * false) release pastes a copy and selection stays put — repeatable, source
+ * untouched. In cut mode release also clears source region and drops
+ * selection — a one-shot true move. */
 static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
     if (left_press && vp->has_selection) {
@@ -383,8 +381,8 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
     }
 }
 
-/* Plot callback that stamps shape cells onto the active canvas - the commit
- * twin of render()'s preview callback; both walk tart_shape_points. */
+/* Plot callback that stamps shape cells onto active canvas — commit twin
+ * of render()'s preview callback; both walk tart_shape_points. */
 struct TartShapeCommit { App *app; wchar_t ch; unsigned char color; };
 static void tart_commit_plot(int wx, int wy, void *vctx) {
     struct TartShapeCommit *c = vctx;
@@ -414,9 +412,9 @@ static void tart_tool_shape(App *app, int wx, int wy, bool left_press, bool left
     }
 }
 
-/* Curve: two-stage. Stage 1 is a normal drag fixing the endpoints; then
- * curve_pending holds while the Bezier control point follows the cursor
- * (live preview in render()), and the next click stamps it. Esc cancels. */
+/* Curve: two-stage. Stage 1 is normal drag fixing endpoints; then
+ * curve_pending holds while Bezier control point follows cursor (live
+ * preview in render()), next click stamps it. Esc cancels. */
 static void tart_tool_curve(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
     if (vp->curve_pending) {
@@ -449,9 +447,9 @@ static void tart_tool_curve(App *app, int wx, int wy, bool left_press, bool left
     }
 }
 
-/* Returns true if the click was consumed by the menu bar / an open dropdown,
- * meaning the rest of tart_apply_mouse should not also treat it as a canvas
- * or tool-panel interaction. */
+/* Returns true if click was consumed by menu bar / an open dropdown —
+ * rest of tart_apply_mouse should not also treat it as a canvas or
+ * tool-panel interaction. */
 static bool tart_handle_menu_click(App *app, int sx, int sy, TartRect menu_r) {
     Viewport *vp = &app->viewport;
     TartMenuBarItem mitems[TART_MENU_COUNT];
@@ -482,9 +480,9 @@ static bool tart_handle_menu_click(App *app, int sx, int sy, TartRect menu_r) {
     return false;
 }
 
-/* mid/right press-release and ctrl/alt are decoded here but not consumed by
- * any tool yet; kept in the signature so a future tool binding doesn't have
- * to touch the SGR/getmouse decode paths again to get at them. */
+/* mid/right press-release and ctrl/alt decoded here but not consumed by any
+ * tool yet; kept in signature so a future tool binding doesn't have to
+ * touch SGR/getmouse decode paths again to get at them. */
 static void tart_apply_mouse(App *app, int sx, int sy,
                               bool left_press, bool left_release,
                               bool mid_press, bool mid_release,
@@ -499,10 +497,10 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     if (left_press)    vp->left_click_held = true;
     if (left_release)  vp->left_click_held = false;
 
-    /* A prompt owns all interaction while open (same as an open dropdown
-     * menu already does via the click-away/dismiss path below) - button
-     * state above is updated so press/release stay balanced, but nothing
-     * past this point should happen while the user is mid-typing. */
+    /* Prompt owns all interaction while open (same as open dropdown menu
+     * already does via click-away/dismiss path below) — button state above
+     * updated so press/release stay balanced, but nothing past this point
+     * should happen while user is mid-typing. */
     if (vp->prompt_mode != PROMPT_NONE) return;
 
     if (vp->command_mode) {
@@ -586,50 +584,13 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         return;
     }
 
-    if (vp->color_picker_visible) {
-        int px, py, pw, ph, bar_x, bar_w;
-        tart_compute_color_picker_geom(&px, &py, &pw, &ph, &bar_x, &bar_w);
-        bool inside = (sx >= px && sx < px + pw && sy >= py && sy < py + ph);
-
-        int slider = sy - (py + 3);
-        if (slider >= 0 && slider < 3 && sx >= bar_x && sx < bar_x + bar_w) {
-            if (vp->left_click_held) {
-                int max_v = (slider == 0) ? 360 : 100;
-                int value = (sx - bar_x) * max_v / (bar_w - 1);
-                if (value < 0) value = 0;
-                if (value > max_v) value = max_v;
-                if (slider == 0) vp->hsl_h = value;
-                else if (slider == 1) vp->hsl_s = value;
-                else vp->hsl_l = value;
-                vp->color_slider_focus = slider;
-            }
-            return;
-        }
-
-        int swatch_row = py + 7;
-        if (sy == swatch_row && sx >= px + 11 && sx < px + 19) {
-            if (left_press) {
-                int r, g, b;
-                tart_hsl_to_rgb(vp->hsl_h, vp->hsl_s, vp->hsl_l, &r, &g, &b);
-                vp->current_color = (unsigned char)tart_rgb_to_256(r, g, b);
-                vp->color_picker_visible = false;
-            }
-            return;
-        }
-
-        if (left_press && !inside) {
-            vp->color_picker_visible = false;
-        }
-        return;
-    }
-
     /* Wheel pans the view. Horizontal arrives several ways, all handled:
      * native horizontal-wheel events (SGR buttons 66/67, from a tilt wheel);
      * Shift+wheel with the shift bit, from terminals that pass it through;
-     * and Alt+wheel - the reliable modifier, because xterm-family terminals
+     * and Alt+wheel — the reliable modifier, since xterm-family terminals
      * (Windows Terminal included) reserve Shift+mouse for making a normal
-     * text selection past the app's mouse capture, and may swallow the
-     * event entirely instead of reporting it. */
+     * text selection past app's mouse capture, may swallow event entirely
+     * instead of reporting it. */
     if (wheel_up || wheel_down || wheel_left || wheel_right) {
         if (wheel_left)       vp->offset_x -= 4;
         else if (wheel_right) vp->offset_x += 4;
@@ -647,8 +608,8 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         return;
     }
 
-    /* The anim/status rows sit below the canvas; consume events there so a
-     * click can never fall through and paint a scrolled-out-of-view cell. */
+    /* Anim/status rows sit below canvas; consume events there — click can
+     * never fall through and paint a scrolled-out-of-view cell. */
     if (sy >= anim_r.y) {
         if (left_press && sy == anim_r.y) {
             TartAnimItem items[TART_ANIM_MAX_ITEMS];
@@ -694,9 +655,8 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         }
     } else {
         bool acting = vp->left_click_held || vp->space_held;
-        /* One undo entry per stroke, not per stamped cell: snapshot when a
-         * draw/erase gesture opens, and let it close when the press/space
-         * ends. */
+        /* One undo entry per stroke, not per stamped cell: snapshot when
+         * draw/erase gesture opens, let it close when press/space ends. */
         if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
             if (acting && !vp->stroke_open) {
                 tart_undo_push(app, vp->tool == TOOL_ERASER ? "erase" : "draw");
@@ -740,7 +700,7 @@ static void tart_apply_mouse(App *app, int sx, int sy,
 
 void handle_input(App *app) {
     /* Playback advances on wall time, checked once per loop; getch's 50ms
-     * timeout caps the effective playback rate at ~20fps. */
+     * timeout caps effective playback rate at ~20fps. */
     if (app->playing && app->frame_count > 1) {
         long now = tart_now_ms();
         if (now - app->play_last_ms >= 1000 / app->fps) {
@@ -764,12 +724,10 @@ void handle_input(App *app) {
     bool sgr_shift = false, sgr_ctrl = false, sgr_alt = false;
 
     if (ch == 27) {
-        /* ncurses' terminfo kmous is the legacy "\E[M" prefix, so it never
-         * recognizes xterm SGR mouse reports ("\E[<...M/m"). Terminals that
-         * support SGR (nearly all modern ones) still emit them once we
-         * request mode 1006, so we parse those bytes by hand here. A real
-         * standalone Escape keypress has nothing following it, so a
-         * zero-delay peek reliably tells the two apart. */
+        /* ncurses' kmous is legacy \E[M prefix, can't parse SGR
+         * (\E[<...M/m). Most modern terminals emit SGR once mode 1006
+         * requested — parse by hand here. Real standalone Escape has
+         * nothing following — zero-delay peek tells the two apart. */
         timeout(0);
         int c1 = getch();
         if (c1 == '[') {
@@ -801,7 +759,7 @@ void handle_input(App *app) {
                     sgr_alt   = (cb & 8) != 0;
                     sgr_ctrl  = (cb & 16) != 0;
                     if (cb & 64) {
-                        /* Wheel events: low two bits pick the direction
+                        /* Wheel events: low two bits pick direction
                          * (0=up 1=down 2=left 3=right). */
                         int wheel_dir = cb & 3;
                         sgr_wheel_up    = (wheel_dir == 0);
@@ -809,11 +767,11 @@ void handle_input(App *app) {
                         sgr_wheel_left  = (wheel_dir == 2);
                         sgr_wheel_right = (wheel_dir == 3);
                     } else {
-                        /* A fresh press never carries the motion flag (bit
-                         * 0x20); drag-continuation samples repeat the same
-                         * button number WITH it set. Without this check,
-                         * every motion sample during a drag would look like
-                         * a brand-new press, which re-arms drag-start state
+                        /* Fresh press never carries motion flag (bit 0x20);
+                         * drag-continuation samples repeat same button
+                         * number WITH it set. Without this check, every
+                         * motion sample during a drag would look like a
+                         * brand-new press, re-arming drag-start state
                          * (rect/select) on every intermediate sample instead
                          * of only at the real press. */
                         bool motion = (cb & 32) != 0;
@@ -833,9 +791,9 @@ void handle_input(App *app) {
                 ungetch('[');
             }
         } else if (c1 != ERR) {
-            /* Most terminals send Alt+<letter> as ESC followed immediately by
-             * the letter, which is exactly what this zero-delay peek is
-             * built to detect (see the SGR-mouse comment above). */
+            /* Most terminals send Alt+<letter> as ESC followed immediately
+             * by the letter — exactly what this zero-delay peek is built
+             * to detect (see SGR-mouse comment above). */
             int mi = tart_menu_mnemonic_index(c1);
             if (mi >= 0) {
                 timeout(50);
@@ -849,8 +807,15 @@ void handle_input(App *app) {
     }
 
     if (app->viewport.help_visible) {
-        if (ch != KEY_MOUSE) {
+        /* Deltas applied blindly — draw side clamps against current terminal
+         * size, so no need to know content height here. */
+        if (ch == KEY_UP) app->viewport.help_scroll--;
+        else if (ch == KEY_DOWN) app->viewport.help_scroll++;
+        else if (ch == KEY_PPAGE) app->viewport.help_scroll -= 10;
+        else if (ch == KEY_NPAGE) app->viewport.help_scroll += 10;
+        else if (ch != KEY_MOUSE) {
             app->viewport.help_visible = false;
+            app->viewport.help_scroll = 0;
         }
         return;
     }
@@ -862,8 +827,8 @@ void handle_input(App *app) {
         return;
     }
 
-    /* The history viewer is live: Up/Down actually run undo/redo while it's
-     * open, moving the "now" marker through the timeline. */
+    /* History viewer is live: Up/Down actually run undo/redo while it's
+     * open, moving "now" marker through timeline. */
     if (app->viewport.history_visible) {
         if (ch == KEY_UP) tart_undo(app);
         else if (ch == KEY_DOWN) tart_redo(app);
@@ -1014,7 +979,7 @@ void handle_input(App *app) {
             }
         } else if (ch >= '1' && ch <= '9' && (ch - '1') < n) {
             /* Quick-jump straight to a category row by number; arrows/Enter
-             * still pick the exact character from there. */
+             * still pick exact character from there. */
             vp->palette_hover_row = ch - '1';
             vp->palette_hover_char = 0;
         } else if (ch == '\n' || ch == KEY_ENTER) {
@@ -1027,34 +992,6 @@ void handle_input(App *app) {
                 vp->palette_visible = false;
                 tart_open_prompt(app, PROMPT_CUSTOM_CHAR, "");
             }
-        }
-        return;
-    }
-
-    if (app->viewport.color_picker_visible && ch != KEY_MOUSE) {
-        Viewport *vp = &app->viewport;
-        if (ch == 27) {
-            vp->color_picker_visible = false;
-        } else if (ch == 9) {
-            vp->color_slider_focus = (vp->color_slider_focus + 1) % 3;
-        } else if (ch == KEY_LEFT || ch == KEY_RIGHT) {
-            int dir = (ch == KEY_LEFT) ? -1 : 1;
-            if (vp->color_slider_focus == 0) {
-                vp->hsl_h = ((vp->hsl_h + dir * 5) % 360 + 360) % 360;
-            } else if (vp->color_slider_focus == 1) {
-                vp->hsl_s += dir * 5;
-                if (vp->hsl_s < 0) vp->hsl_s = 0;
-                if (vp->hsl_s > 100) vp->hsl_s = 100;
-            } else {
-                vp->hsl_l += dir * 5;
-                if (vp->hsl_l < 0) vp->hsl_l = 0;
-                if (vp->hsl_l > 100) vp->hsl_l = 100;
-            }
-        } else if (ch == '\n' || ch == KEY_ENTER) {
-            int r, g, b;
-            tart_hsl_to_rgb(vp->hsl_h, vp->hsl_s, vp->hsl_l, &r, &g, &b);
-            vp->current_color = (unsigned char)tart_rgb_to_256(r, g, b);
-            vp->color_picker_visible = false;
         }
         return;
     }
@@ -1100,10 +1037,11 @@ void handle_input(App *app) {
     if (ch == KEY_F(1) || ch == '?') {
         app->viewport.help_visible = true;
     }
-    /* Tool selection funnels through the panel action so a tool change
-     * always cancels any half-built drag/curve gesture. Shape tools live on
+    /* Tool selection funnels through panel action — tool change always
+     * cancels any half-built drag/curve gesture. Shape tools live on
      * CAPITALS because their lowercase letters are taken (l vim-right,
-     * c move-cut, e eraser, t palette). */
+     * c move-cut, e eraser, t palette). Fill toggles (rect fill, random
+     * fill) live on 'F' since 'f' selects fill tool. */
     if (ch == 'd' || ch == 'D') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_PENCIL);
     }
@@ -1122,7 +1060,7 @@ void handle_input(App *app) {
     if (ch == 'T') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_TRI);
     }
-    if (ch == 'F') {
+    if (ch == 'f') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_FILL);
     }
     if (ch == 'e') {
@@ -1131,7 +1069,7 @@ void handle_input(App *app) {
     if (ch == 's') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_SELECT);
     }
-    if (ch == 'm') {
+    if (ch == 'v') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_MOVE);
     }
     if (ch == 'H') {
@@ -1159,22 +1097,22 @@ void handle_input(App *app) {
     if (ch == 9) {
         tart_apply_panel_action(app, PANEL_SHAPE_TOGGLE, 0);
     }
-    if (ch == 'f' && app->viewport.tool == TOOL_RECT) {
+    if (ch == 'F' && app->viewport.tool == TOOL_RECT) {
         tart_apply_panel_action(app, PANEL_RECT_FILL_TOGGLE, 0);
     }
-    if (ch == 'f' && app->viewport.tool == TOOL_FILL) {
+    if (ch == 'F' && app->viewport.tool == TOOL_FILL) {
         tart_apply_panel_action(app, PANEL_FILL_RANDOM_TOGGLE, 0);
     }
     if (ch == 'c' && app->viewport.tool == TOOL_MOVE) {
         tart_apply_panel_action(app, PANEL_MOVE_CUT_TOGGLE, 0);
     }
-    if (ch == 'v' || ch == 'V') {
+    if (ch == 'm' || ch == 'M') {
         tart_toggle_pan(app);
     }
-    if (ch == 'n') {
+    if (ch == '>') {
         tart_anim_action(app, ANIM_FRAME_NEXT);
     }
-    if (ch == 'N') {
+    if (ch == '<') {
         tart_anim_action(app, ANIM_FRAME_PREV);
     }
     if (ch == 'a') {
@@ -1286,8 +1224,8 @@ void handle_input(App *app) {
                 sgr_wheel_left, sgr_wheel_right,
                 sgr_shift, sgr_ctrl, sgr_alt);
         } else {
-            /* ncurses' mouse protocol (v1) has no horizontal-wheel buttons,
-             * so wheel left/right only ever arrive via the SGR path above. */
+            /* ncurses' mouse protocol (v1) has no horizontal-wheel buttons —
+             * wheel left/right only ever arrive via SGR path above. */
             MEVENT event;
             if (getmouse(&event) == OK) {
                 tart_apply_mouse(app, event.x, event.y,

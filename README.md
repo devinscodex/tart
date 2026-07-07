@@ -29,16 +29,16 @@ by a small margin.
 
 | | |
 |---|---|
-| Tools | `d` draw, `e` eraser, `r` rect, `s` select, `m` move |
+| Tools | `d` draw, `e` eraser, `r` rect, `s` select, `v` move |
 | Shapes | `L` line, `C` curve (drag ends, then click to set the bend), `E` ellipse, `T` triangle — `Esc` cancels a half-built shape |
-| Fill | `F` bucket fill (click repaints the connected region), `f` toggles random texture mode |
-| Brush | `t` char palette, `-`/`=` size, `Tab` shape, `f` rect-fill, `c` move cut/stamp |
+| Fill | `f` bucket fill (click repaints the connected region), `F` toggles random texture mode |
+| Brush | `t` char palette, `-`/`=` size, `Tab` shape, `F` rect-fill, `c` move cut/stamp |
 | Edit | `u` undo, `U` redo, `H` history viewer (`Up`/`Down` walk the timeline live) — one step per stroke/stamp; structural ops reset history |
-| Color | `[`/`]` quick palette, click the Color row for the HSL picker |
-| Frames | `n`/`N` next/prev, `a` add blank, `A` duplicate, `x` delete, `Enter` play/stop, `o` onion skin, `:fps N` |
+| Color | `[`/`]` cycle the quick palette (white, gray, ROYGBIV, black), click a Color dot to jump |
+| Frames | `<`/`>` prev/next, `a` add blank, `A` duplicate, `x` delete, `Enter` play/stop, `o` onion skin, `:fps N` |
 | Layers | `{`/`}` prev/next, `:layer-add` / `:layer-del` (or the Layer menu) |
 | Cursor | `h j k l`, `w`/`b` (±5), `0`/`$`, `g`/`G` |
-| View | arrows pan, wheel scrolls, Alt+wheel / Shift+wheel / tilt-wheel scrolls horizontally, `v` pan mode, `Home` reset, `End` jump to bottom-right |
+| View | arrows pan, wheel scrolls, Alt+wheel / Shift+wheel / tilt-wheel scrolls horizontally, `m` pan mode, `Home` reset, `End` jump to bottom-right |
 | Draw | hold left mouse, or hold `space` while moving |
 | Command | `:` or `Ctrl+E`, fuzzy search, Enter runs (`quit`, `save`, `load`, `resize`, ...) |
 | Quit | `q` |
