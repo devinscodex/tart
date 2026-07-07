@@ -203,7 +203,10 @@ static const TartPaletteCategory TART_PALETTE[] = {
  * white, gray, ROYGBIV, black. Values are xterm-256 indices; plain black (0)
  * skipped since Canvas.colors uses 0 as its own "no color" sentinel —
  * cube-black (16) stands in for it instead. */
-static const unsigned char TART_BASIC_COLORS[] = { 15, 250, 196, 208, 226, 46, 21, 57, 129, 16 };
+/* Gray is cube-gray 102 (#878787), not ramp 244/250: canvas pairs sit at
+ * 16 + index, and terminals reporting only 256 color pairs can't register
+ * pairs past 255 — palette indices >= 240 silently render garbage there. */
+static const unsigned char TART_BASIC_COLORS[] = { 15, 102, 196, 208, 226, 46, 21, 57, 129, 16 };
 #define TART_BASIC_COLOR_COUNT (sizeof(TART_BASIC_COLORS) / sizeof(TART_BASIC_COLORS[0]))
 
 /* Discrete brush/eraser sizes for '-'/'=' cycle keys and size slider; shared
@@ -685,8 +688,11 @@ void init_app(App *app) {
      * stay clear of chrome pairs above (COLORS/pairs here are 256/65536 per
      * terminfo — ample room). Index 0 in Canvas.colors means "no color /
      * default", never looked up as a pair. */
-    for (int i = 0; i < 256; i++) {
-        init_pair(16 + i, i, COLOR_BLACK);
+    /* Cap at COLOR_PAIRS: terminals advertising only 256 pairs can't hold
+     * the full 272 (16 chrome + 256 canvas) — skip what won't fit instead
+     * of issuing failing init_pair calls. */
+    for (int i = 0; i < 256 && 16 + i < COLOR_PAIRS; i++) {
+        init_pair((short)(16 + i), (short)i, COLOR_BLACK);
     }
 
     app->width = TART_DEFAULT_CANVAS_WIDTH;
@@ -1514,12 +1520,18 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attron(a);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
         attroff(a);
-        /* Underline the actual bound key, not just label's literal first
-         * letter — Eraser (e) and Ellipse (E) both start with same printable
-         * letter but differ by case, so label[0] alone can't tell them
-         * apart on screen. */
+        /* Underline bound key where it occurs in label (case-insensitive,
+         * overprinted in key's own case so Eraser e / Ellipse E stay
+         * distinguishable) — key isn't always the first letter (Move = v). */
+        int kpos = 0;
+        for (int j = 0; tools[i].label[j]; j++) {
+            if (tolower((unsigned char)tools[i].label[j]) == tolower((unsigned char)tools[i].key)) {
+                kpos = j;
+                break;
+            }
+        }
         attron(a | A_UNDERLINE);
-        mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%c", tools[i].key);
+        mvprintw(tool_r.y + tools[i].row, tool_r.x + 1 + kpos, "%c", tools[i].key);
         attroff(a | A_UNDERLINE);
     }
 
