@@ -17,6 +17,18 @@ static int tart_cycle_size(int size, int dir) {
     return TART_BRUSH_SIZES[idx];
 }
 
+/* A half-built shape gesture (drag in progress, curve waiting for its bend
+ * click, a pencil/eraser stroke's undo entry still open) must not survive a
+ * tool change, an Esc, or a frame/layer jump - otherwise it either commits
+ * with the wrong tool's semantics or lands on a canvas the user isn't
+ * looking at anymore. Every place that can interrupt a gesture funnels
+ * through here so none of them can forget a field the others reset. */
+static void tart_cancel_gesture(Viewport *vp) {
+    vp->tool_dragging = false;
+    vp->curve_pending = false;
+    vp->stroke_open = false;
+}
+
 /* Executes whatever a tool-panel row (or its keyboard equivalent) does. The
  * size/shape actions apply to whichever of brush_size/eraser_size is active
  * for the current tool, so pencil and eraser keep independent settings. */
@@ -25,10 +37,7 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
     switch (action) {
         case PANEL_SELECT_TOOL:
             vp->tool = (TartTool)value;
-            /* A half-built gesture must not survive a tool change - a stale
-             * curve_pending would commit with another tool's semantics. */
-            vp->tool_dragging = false;
-            vp->curve_pending = false;
+            tart_cancel_gesture(vp);
             break;
         case PANEL_CHAR_OPEN:
             tart_open_palette(app, PALETTE_TARGET_PENCIL);
@@ -178,6 +187,10 @@ static long tart_now_ms(void) {
  * hit-test, the equivalent keys (n/N a A x { } Enter o), the Anim/Layer
  * menus, and the ':' commands. */
 static void tart_anim_action(App *app, TartAnimAction action) {
+    /* Frame/layer navigation can happen mid-drag (mouse and keyboard are
+     * independent input sources); a gesture that started on one frame/layer
+     * must not commit onto whichever one is active when it finally closes. */
+    tart_cancel_gesture(&app->viewport);
     switch (action) {
         case ANIM_FRAME_PREV: app->cur_frame = (app->cur_frame + app->frame_count - 1) % app->frame_count; break;
         case ANIM_FRAME_NEXT: app->cur_frame = (app->cur_frame + 1) % app->frame_count; break;
@@ -695,18 +708,6 @@ static void tart_apply_mouse(App *app, int sx, int sy,
             case TOOL_PENCIL:
                 if (acting) tart_stamp(app, wx, wy, vp->brush_size, vp->brush_shape, vp->brush_char, vp->current_color);
                 break;
-            case TOOL_ERASER:
-                if (acting) tart_stamp(app, wx, wy, vp->eraser_size, vp->eraser_shape, L' ', 0);
-                break;
-            case TOOL_RECT:
-                tart_tool_rect(app, wx, wy, left_press, left_release);
-                break;
-            case TOOL_SELECT:
-                tart_tool_select(app, wx, wy, left_press, left_release);
-                break;
-            case TOOL_MOVE:
-                tart_tool_move(app, wx, wy, left_press, left_release);
-                break;
             case TOOL_LINE:
             case TOOL_ELLIPSE:
             case TOOL_TRI:
@@ -715,8 +716,20 @@ static void tart_apply_mouse(App *app, int sx, int sy,
             case TOOL_CURVE:
                 tart_tool_curve(app, wx, wy, left_press, left_release);
                 break;
+            case TOOL_RECT:
+                tart_tool_rect(app, wx, wy, left_press, left_release);
+                break;
             case TOOL_FILL:
                 if (left_press) tart_flood_fill(app, wx, wy);
+                break;
+            case TOOL_ERASER:
+                if (acting) tart_stamp(app, wx, wy, vp->eraser_size, vp->eraser_shape, L' ', 0);
+                break;
+            case TOOL_SELECT:
+                tart_tool_select(app, wx, wy, left_press, left_release);
+                break;
+            case TOOL_MOVE:
+                tart_tool_move(app, wx, wy, left_press, left_release);
                 break;
         }
     }
@@ -1094,23 +1107,14 @@ void handle_input(App *app) {
     if (ch == 'd' || ch == 'D') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_PENCIL);
     }
-    if (ch == 'e') {
-        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_ERASER);
-    }
-    if (ch == 'r') {
-        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_RECT);
-    }
-    if (ch == 's') {
-        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_SELECT);
-    }
-    if (ch == 'm') {
-        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_MOVE);
-    }
     if (ch == 'L') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_LINE);
     }
     if (ch == 'C') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_CURVE);
+    }
+    if (ch == 'r') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_RECT);
     }
     if (ch == 'E') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_ELLIPSE);
@@ -1121,13 +1125,21 @@ void handle_input(App *app) {
     if (ch == 'F') {
         tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_FILL);
     }
+    if (ch == 'e') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_ERASER);
+    }
+    if (ch == 's') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_SELECT);
+    }
+    if (ch == 'm') {
+        tart_apply_panel_action(app, PANEL_SELECT_TOOL, TOOL_MOVE);
+    }
     if (ch == 'H') {
         app->viewport.history_visible = true;
     }
     if (ch == 27) {
         /* Bare Esc in normal mode: abandon any in-flight shape gesture. */
-        app->viewport.tool_dragging = false;
-        app->viewport.curve_pending = false;
+        tart_cancel_gesture(&app->viewport);
     }
     if (ch == 't') {
         tart_apply_panel_action(app, PANEL_CHAR_OPEN, 0);

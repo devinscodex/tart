@@ -115,8 +115,9 @@ typedef struct {
 } TartMenuBarItem;
 
 typedef enum {
-    TOOL_PENCIL, TOOL_ERASER, TOOL_RECT, TOOL_SELECT, TOOL_MOVE,
-    TOOL_LINE, TOOL_CURVE, TOOL_ELLIPSE, TOOL_TRI, TOOL_FILL,
+    TOOL_PENCIL, TOOL_LINE, TOOL_CURVE,
+    TOOL_RECT, TOOL_ELLIPSE, TOOL_TRI, TOOL_FILL,
+    TOOL_ERASER, TOOL_SELECT, TOOL_MOVE,
 } TartTool;
 typedef enum { BRUSH_SQUARE, BRUSH_ROUND } BrushShape;
 
@@ -220,15 +221,15 @@ typedef struct {
  * they can never drift out of sync with each other. */
 #define TP_ROW_TOOLS_HEADER   1
 #define TP_ROW_PENCIL         3
-#define TP_ROW_ERASER         4
-#define TP_ROW_RECT           5
-#define TP_ROW_SELECT         6
-#define TP_ROW_MOVE           7
-#define TP_ROW_LINE           8
-#define TP_ROW_CURVE          9
-#define TP_ROW_ELLIPSE        10
-#define TP_ROW_TRI            11
-#define TP_ROW_FILL           12
+#define TP_ROW_LINE           4
+#define TP_ROW_CURVE          5
+#define TP_ROW_RECT           6
+#define TP_ROW_ELLIPSE        7
+#define TP_ROW_TRI            8
+#define TP_ROW_FILL           9
+#define TP_ROW_ERASER         10
+#define TP_ROW_SELECT         11
+#define TP_ROW_MOVE           12
 #define TP_ROW_OPTIONS_HEADER 14
 #define TP_ROW_OPT1           15
 #define TP_ROW_OPT2           16
@@ -619,6 +620,12 @@ static void tart_undo_apply(App *app, TartUndoState *from, int *from_count,
     memcpy(c->colors, s.colors, (size_t)s.width * s.height);
     app->cur_frame = s.frame;
     app->cur_layer = s.layer;
+    /* Undo/redo can jump to a different frame/layer than the one a half-built
+     * shape drag started on; a stale gesture must not commit onto the new
+     * target after this jump. */
+    app->viewport.tool_dragging = false;
+    app->viewport.curve_pending = false;
+    app->viewport.stroke_open = false;
     tart_undo_free_state(&s);
     (*from_count)--;
 }
@@ -1249,15 +1256,15 @@ void render(App *app) {
         cx += (int)strlen(mode_badge) + 1;
 
         {
-            const char *tool_name = (app->viewport.tool == TOOL_PENCIL) ? "draw" :
-                                     (app->viewport.tool == TOOL_ERASER) ? "eraser" :
-                                     (app->viewport.tool == TOOL_RECT)   ? "rect"   :
-                                     (app->viewport.tool == TOOL_SELECT) ? "select" :
-                                     (app->viewport.tool == TOOL_MOVE)   ? "move"   :
-                                     (app->viewport.tool == TOOL_LINE)   ? "line"   :
-                                     (app->viewport.tool == TOOL_CURVE)  ? "curve"  :
+            const char *tool_name = (app->viewport.tool == TOOL_PENCIL)  ? "draw" :
+                                     (app->viewport.tool == TOOL_LINE)    ? "line"   :
+                                     (app->viewport.tool == TOOL_CURVE)   ? "curve"  :
+                                     (app->viewport.tool == TOOL_RECT)    ? "rect"   :
                                      (app->viewport.tool == TOOL_ELLIPSE) ? "ellipse" :
-                                     (app->viewport.tool == TOOL_TRI)    ? "triangle" : "fill";
+                                     (app->viewport.tool == TOOL_TRI)     ? "triangle" :
+                                     (app->viewport.tool == TOOL_FILL)    ? "fill" :
+                                     (app->viewport.tool == TOOL_ERASER)  ? "eraser" :
+                                     (app->viewport.tool == TOOL_SELECT)  ? "select" : "move";
             attron(COLOR_PAIR(5) | A_BOLD);
             if (app->viewport.tool == TOOL_PENCIL) {
                 mvprintw(status_r.y, cx, "tool:%s '%lc'", tool_name, (wint_t)app->viewport.brush_char);
@@ -1450,36 +1457,36 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
     int n = 0;
 
     rows[n++] = (TartPanelRow){ TP_ROW_PENCIL,  -1, -1, PANEL_SELECT_TOOL, TOOL_PENCIL };
-    rows[n++] = (TartPanelRow){ TP_ROW_ERASER,  -1, -1, PANEL_SELECT_TOOL, TOOL_ERASER };
-    rows[n++] = (TartPanelRow){ TP_ROW_RECT,    -1, -1, PANEL_SELECT_TOOL, TOOL_RECT };
-    rows[n++] = (TartPanelRow){ TP_ROW_SELECT,  -1, -1, PANEL_SELECT_TOOL, TOOL_SELECT };
-    rows[n++] = (TartPanelRow){ TP_ROW_MOVE,    -1, -1, PANEL_SELECT_TOOL, TOOL_MOVE };
     rows[n++] = (TartPanelRow){ TP_ROW_LINE,    -1, -1, PANEL_SELECT_TOOL, TOOL_LINE };
     rows[n++] = (TartPanelRow){ TP_ROW_CURVE,   -1, -1, PANEL_SELECT_TOOL, TOOL_CURVE };
+    rows[n++] = (TartPanelRow){ TP_ROW_RECT,    -1, -1, PANEL_SELECT_TOOL, TOOL_RECT };
     rows[n++] = (TartPanelRow){ TP_ROW_ELLIPSE, -1, -1, PANEL_SELECT_TOOL, TOOL_ELLIPSE };
     rows[n++] = (TartPanelRow){ TP_ROW_TRI,     -1, -1, PANEL_SELECT_TOOL, TOOL_TRI };
     rows[n++] = (TartPanelRow){ TP_ROW_FILL,    -1, -1, PANEL_SELECT_TOOL, TOOL_FILL };
+    rows[n++] = (TartPanelRow){ TP_ROW_ERASER,  -1, -1, PANEL_SELECT_TOOL, TOOL_ERASER };
+    rows[n++] = (TartPanelRow){ TP_ROW_SELECT,  -1, -1, PANEL_SELECT_TOOL, TOOL_SELECT };
+    rows[n++] = (TartPanelRow){ TP_ROW_MOVE,    -1, -1, PANEL_SELECT_TOOL, TOOL_MOVE };
 
     if (vp->tool == TOOL_PENCIL) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_CHAR_OPEN, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_DEC_X, TP_SIZE_DEC_X, PANEL_SIZE_DEC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_INC_X, TP_SIZE_INC_X, PANEL_SIZE_INC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
+    } else if (vp->tool == TOOL_LINE || vp->tool == TOOL_CURVE ||
+               vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_CHAR_OPEN, 0 };
+    } else if (vp->tool == TOOL_RECT) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_RECT_FILL_TOGGLE, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
+    } else if (vp->tool == TOOL_FILL) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_FILL_RANDOM_TOGGLE, 0 };
     } else if (vp->tool == TOOL_ERASER) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT1, TP_SIZE_DEC_X, TP_SIZE_DEC_X, PANEL_SIZE_DEC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT1, TP_SIZE_INC_X, TP_SIZE_INC_X, PANEL_SIZE_INC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
-    } else if (vp->tool == TOOL_RECT) {
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_RECT_FILL_TOGGLE, 0 };
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
     } else if (vp->tool == TOOL_MOVE) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_MOVE_CUT_TOGGLE, 0 };
-    } else if (vp->tool == TOOL_LINE || vp->tool == TOOL_CURVE ||
-               vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_CHAR_OPEN, 0 };
-    } else if (vp->tool == TOOL_FILL) {
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_FILL_RANDOM_TOGGLE, 0 };
     }
 
     if (vp->tool == TOOL_PENCIL || vp->tool == TOOL_ERASER) {
@@ -1504,17 +1511,17 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     mvprintw(tool_r.y + TP_ROW_TOOLS_HEADER, tool_r.x + 1, "Tools");
     attroff(A_BOLD);
 
-    static const struct { int row; const char *label; TartTool tool; } tools[] = {
-        { TP_ROW_PENCIL,  "Draw",     TOOL_PENCIL },
-        { TP_ROW_ERASER,  "Eraser",   TOOL_ERASER },
-        { TP_ROW_RECT,    "Rect",     TOOL_RECT },
-        { TP_ROW_SELECT,  "Select",   TOOL_SELECT },
-        { TP_ROW_MOVE,    "Move",     TOOL_MOVE },
-        { TP_ROW_LINE,    "Line",     TOOL_LINE },
-        { TP_ROW_CURVE,   "Curve",    TOOL_CURVE },
-        { TP_ROW_ELLIPSE, "Ellipse",  TOOL_ELLIPSE },
-        { TP_ROW_TRI,     "Triangle", TOOL_TRI },
-        { TP_ROW_FILL,    "Fill",     TOOL_FILL },
+    static const struct { int row; const char *label; TartTool tool; char key; } tools[] = {
+        { TP_ROW_PENCIL,  "Draw",     TOOL_PENCIL,  'd' },
+        { TP_ROW_LINE,    "Line",     TOOL_LINE,    'L' },
+        { TP_ROW_CURVE,   "Curve",    TOOL_CURVE,   'C' },
+        { TP_ROW_RECT,    "Rect",     TOOL_RECT,    'r' },
+        { TP_ROW_ELLIPSE, "Ellipse",  TOOL_ELLIPSE, 'E' },
+        { TP_ROW_TRI,     "Triangle", TOOL_TRI,     'T' },
+        { TP_ROW_FILL,    "Fill",     TOOL_FILL,    'F' },
+        { TP_ROW_ERASER,  "Eraser",   TOOL_ERASER,  'e' },
+        { TP_ROW_SELECT,  "Select",   TOOL_SELECT,  's' },
+        { TP_ROW_MOVE,    "Move",     TOOL_MOVE,    'm' },
     };
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
         bool sel = (vp->tool == tools[i].tool);
@@ -1522,24 +1529,24 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attron(a);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
         attroff(a);
-        /* Every tool binds to its label's first letter - lowercase for the
-         * classic five (d/e/r/s/m), CAPITAL for the shapes (L/C/E/T) since
-         * their lowercase letters are all taken by other bindings. Underline
-         * it so the binding is visible without opening the help overlay. */
+        /* Underline the actual bound key, not just the label's literal first
+         * letter - Eraser (e) and Ellipse (E) both start with the same
+         * printable letter but differ by case, so label[0] alone can't tell
+         * them apart on screen. */
         attron(a | A_UNDERLINE);
-        mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%c", tools[i].label[0]);
+        mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%c", tools[i].key);
         attroff(a | A_UNDERLINE);
     }
 
-    const char *header = (vp->tool == TOOL_PENCIL) ? "Draw" :
-                          (vp->tool == TOOL_ERASER) ? "Eraser" :
-                          (vp->tool == TOOL_RECT)   ? "Rectangle" :
-                          (vp->tool == TOOL_SELECT) ? "Select" :
-                          (vp->tool == TOOL_MOVE)   ? "Move" :
-                          (vp->tool == TOOL_LINE)   ? "Line" :
-                          (vp->tool == TOOL_CURVE)  ? "Curve" :
+    const char *header = (vp->tool == TOOL_PENCIL)  ? "Draw" :
+                          (vp->tool == TOOL_LINE)    ? "Line" :
+                          (vp->tool == TOOL_CURVE)   ? "Curve" :
+                          (vp->tool == TOOL_RECT)    ? "Rectangle" :
                           (vp->tool == TOOL_ELLIPSE) ? "Ellipse" :
-                          (vp->tool == TOOL_TRI)    ? "Triangle" : "Fill";
+                          (vp->tool == TOOL_TRI)     ? "Triangle" :
+                          (vp->tool == TOOL_FILL)    ? "Fill" :
+                          (vp->tool == TOOL_ERASER)  ? "Eraser" :
+                          (vp->tool == TOOL_SELECT)  ? "Select" : "Move";
     attron(A_BOLD | COLOR_PAIR(1));
     mvprintw(tool_r.y + TP_ROW_OPTIONS_HEADER, tool_r.x + 1, "%s", header);
     attroff(A_BOLD | COLOR_PAIR(1));
@@ -1548,24 +1555,15 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Size:%d  -  =", vp->brush_size);
         mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Shape: %s", vp->brush_shape == BRUSH_ROUND ? "round" : "square");
-    } else if (vp->tool == TOOL_ERASER) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Size:%d  -  =", vp->eraser_size);
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Shape: %s", vp->eraser_shape == BRUSH_ROUND ? "round" : "square");
-    } else if (vp->tool == TOOL_RECT) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (f)", vp->rect_filled ? "on" : "off");
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
-    } else if (vp->tool == TOOL_SELECT) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag to select");
-    } else if (vp->tool == TOOL_MOVE) {
-        if (vp->has_selection) mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Buf: %dx%d", vp->sel_w, vp->sel_h);
-        else mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "(no selection)");
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Mode: %s (c)", vp->move_cut ? "cut" : "stamp");
     } else if (vp->tool == TOOL_LINE) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag start-end");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
     } else if (vp->tool == TOOL_CURVE) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, vp->curve_pending ? "Click sets bend" : "Drag ends first");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
+    } else if (vp->tool == TOOL_RECT) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (f)", vp->rect_filled ? "on" : "off");
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
     } else if (vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag bounding box");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
@@ -1573,6 +1571,15 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Click fills region");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->fill_char);
         mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Random: %s (f)", vp->fill_random ? "on" : "off");
+    } else if (vp->tool == TOOL_ERASER) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Size:%d  -  =", vp->eraser_size);
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Shape: %s", vp->eraser_shape == BRUSH_ROUND ? "round" : "square");
+    } else if (vp->tool == TOOL_SELECT) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag to select");
+    } else if (vp->tool == TOOL_MOVE) {
+        if (vp->has_selection) mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Buf: %dx%d", vp->sel_w, vp->sel_h);
+        else mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "(no selection)");
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Mode: %s (c)", vp->move_cut ? "cut" : "stamp");
     }
 
     /* Size slider (pencil/eraser only): "-[dots]= NN", each dot a stop in
