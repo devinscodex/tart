@@ -70,6 +70,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "deselect", NULL, "Clear current selection" },
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
+    { "grid", NULL, "Toggle grid overlay (WxH)" },
     { "resize", NULL, "Resize canvas (WxH)" },
     { "new", NULL, "New blank file" },
     { "save", NULL, "Save to file" },
@@ -97,7 +98,7 @@ typedef struct {
 static const TartMenuDef TART_MENUS[] = {
     { "File",  { "new", "save", "load", "quit" },       4 },
     { "Edit",  { "undo", "redo", "history", "deselect" }, 4 },
-    { "View",  { "reset-view", "toggle-pan", "onion" }, 3 },
+    { "View",  { "reset-view", "toggle-pan", "grid", "onion" }, 4 },
     { "Image", { "resize" },                            1 },
     { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
     { "Layer", { "layer-add", "layer-del" },            2 },
@@ -343,6 +344,12 @@ typedef struct {
     bool stroke_open;       /* draw/erase gesture mid-flight; undo snapshot already taken */
     bool help_visible;
     int help_scroll;    /* first visible help line when overlay taller than terminal */
+
+    /* Grid overlay: dim guide dots over blank cells every grid_w x grid_h
+     * world cells. View-only — never touches document. Default 8x4 (~2:1
+     * cell aspect, so squares on screen; halves cleanly for iso diamonds). */
+    bool grid_on;
+    int grid_w, grid_h;
     bool about_visible;
     bool history_visible;   /* undo/redo history viewer (Up/Down walk it live) */
 } Viewport;
@@ -376,6 +383,9 @@ typedef struct {
     TartUndoState redo_stack[UNDO_STACK_MAX];
     int undo_count;
     int redo_count;
+
+    char doc_path[256];     /* last save/load target; empty = never saved */
+    bool dirty;             /* edits since last save/load/new */
 
     Viewport viewport;
     int running;
@@ -491,6 +501,7 @@ bool tart_frame_add(App *app, bool dup) {
     app->frames[at] = nf;
     app->frame_count++;
     app->cur_frame = at;
+    app->dirty = true;
     tart_undo_clear(app);
     return true;
 }
@@ -502,6 +513,7 @@ void tart_frame_del(App *app) {
             (size_t)(app->frame_count - app->cur_frame - 1) * sizeof(Frame));
     app->frame_count--;
     if (app->cur_frame >= app->frame_count) app->cur_frame = app->frame_count - 1;
+    app->dirty = true;
     tart_undo_clear(app);
 }
 
@@ -525,6 +537,7 @@ bool tart_layer_add(App *app) {
     }
     app->layer_count++;
     app->cur_layer = at;
+    app->dirty = true;
     tart_undo_clear(app);
     return true;
 }
@@ -539,6 +552,7 @@ void tart_layer_del(App *app) {
     }
     app->layer_count--;
     if (app->cur_layer >= app->layer_count) app->cur_layer = app->layer_count - 1;
+    app->dirty = true;
     tart_undo_clear(app);
 }
 
@@ -583,6 +597,7 @@ void tart_undo_push(App *app, const char *desc) {
     s.desc = desc;
     tart_undo_stack_push(app->undo_stack, &app->undo_count, s);
     while (app->redo_count > 0) tart_undo_free_state(&app->redo_stack[--app->redo_count]);
+    app->dirty = true;
 }
 
 /* Undo and redo are the same swap in opposite directions: pop snapshot,
@@ -689,6 +704,8 @@ void init_app(App *app) {
     vp->fill_char = L'#';
     vp->open_menu = -1;
     vp->mode = 'n';
+    vp->grid_w = 8;
+    vp->grid_h = 4;
     app->running = 1;
 }
 
@@ -1054,6 +1071,14 @@ void render(App *app) {
                         attrs |= A_DIM;
                     }
                 }
+                /* Grid overlay: dotted guide lines on cells still blank after
+                 * onion ghosting — pure view chrome, document untouched. */
+                if (ch_to_draw == L' ' && app->viewport.grid_on &&
+                    (world_x % app->viewport.grid_w == 0 ||
+                     world_y % app->viewport.grid_h == 0)) {
+                    ch_to_draw = L'·';
+                    attrs |= A_DIM;
+                }
             } else {
                 attrs = A_DIM;
                 ch_to_draw = (world_x % 10 == 0 && world_y % 5 == 0) ? L'+' : L'.';
@@ -1229,6 +1254,16 @@ void render(App *app) {
         mvprintw(status_r.y, cx, "cursor[%4d,%4d]", app->viewport.vim_cursor_x, app->viewport.vim_cursor_y);
         attroff(COLOR_PAIR(5));
         cx += 18;
+
+        /* Document name + unsaved-star, vim-style. */
+        {
+            const char *name = app->doc_path[0] ? app->doc_path : "[untitled]";
+            attr_t a = COLOR_PAIR(5) | (app->dirty ? A_BOLD : A_NORMAL);
+            attron(a);
+            mvprintw(status_r.y, cx, "%s%s", name, app->dirty ? " *" : "");
+            attroff(a);
+            cx += (int)strlen(name) + (app->dirty ? 2 : 0) + 1;
+        }
 
         const char *hint = ": commands   ?/F1 help   q quit";
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
@@ -1837,6 +1872,7 @@ bool tart_resize_doc(App *app, int new_w, int new_h) {
     }
     app->width = new_w;
     app->height = new_h;
+    app->dirty = true;
     tart_undo_clear(app);
     return true;
 }
@@ -1871,6 +1907,8 @@ bool tart_new_doc(App *app) {
     app->viewport.sel_colors = NULL;
     app->viewport.has_selection = false;
 
+    app->doc_path[0] = '\0';
+    app->dirty = false;
     tart_undo_clear(app);
     return true;
 }
@@ -1941,6 +1979,9 @@ bool tart_save_doc(App *app, const char *path) {
     }
 
     fclose(f);
+    strncpy(app->doc_path, path, sizeof(app->doc_path) - 1);
+    app->doc_path[sizeof(app->doc_path) - 1] = '\0';
+    app->dirty = false;
     return true;
 }
 
@@ -2030,6 +2071,9 @@ bool tart_load_doc(App *app, const char *path) {
     app->height = h;
     app->fps = fps;
     app->playing = false;
+    strncpy(app->doc_path, path, sizeof(app->doc_path) - 1);
+    app->doc_path[sizeof(app->doc_path) - 1] = '\0';
+    app->dirty = false;
     tart_undo_clear(app);
     return true;
 }
@@ -2043,6 +2087,7 @@ void tart_draw_help_overlay(App *app) {
         "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
         "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
         "View    m toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
+        "        :grid toggles a dotted guide overlay; :grid WxH sets cell size (8x4)",
         "Tools   d draw   e eraser   r rect   s select   v move (underlined letter)",
         "Shapes  L line   C curve   E ellipse   T triangle - drag to place;",
         "        curve: drag the endpoints, then move to bend, click to set;",
@@ -2065,7 +2110,8 @@ void tart_draw_help_overlay(App *app) {
         "        space is transparent - lower layers show through; edits hit the",
         "        active layer only (see the anim bar / status readout)",
         "Image   Image menu > Resize Canvas (WxH) - resizes every frame and layer",
-        "File    File menu > New/Save/Load, or :new / :save <name> / :load <name>",
+        "File    File menu > New/Save/Load, or :new / :save [name] / :load <name>",
+        "        bare :save reuses the current file - status bar shows name, * = unsaved",
         "Menu    Alt+F/E/V/I/A/L/H or click to open, arrows to move, Enter, Esc closes",
         "Cmd     : or Ctrl+E, fuzzy-searches as you type, Up/Down or wheel to pick,",
         "          Enter or click a row to run (save, load, resize, play, fps,",

@@ -39,7 +39,9 @@ by a small margin.
 | Layers | `{`/`}` prev/next, `:layer-add` / `:layer-del` (or the Layer menu) |
 | Cursor | `h j k l`, `w`/`b` (±5), `0`/`$`, `g`/`G` |
 | View | arrows pan, wheel scrolls, Alt+wheel / Shift+wheel / tilt-wheel scrolls horizontally, `m` pan mode, `Home` reset, `End` jump to bottom-right |
+| Grid | `:grid` toggles a dotted guide overlay, `:grid WxH` sets its cell size (default 8×4 ≈ square on screen) |
 | Draw | hold left mouse, or hold `space` while moving |
+| File | bare `:save` re-saves to the current file (vim `:w` style); status bar shows the name with `*` when unsaved |
 | Command | `:` or `Ctrl+E`, fuzzy search, Enter runs (`quit`, `save`, `load`, `resize`, ...) |
 | Quit | `q` |
 

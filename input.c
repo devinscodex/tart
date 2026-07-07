@@ -231,6 +231,15 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         tart_reset_view(app);
     } else if (strcmp(name, "toggle-pan") == 0) {
         tart_toggle_pan(app);
+    } else if (strcmp(name, "grid") == 0) {
+        int w, h;
+        if (arg && tart_parse_wh(arg, &w, &h)) {
+            app->viewport.grid_w = w;
+            app->viewport.grid_h = h;
+            app->viewport.grid_on = true;
+        } else {
+            app->viewport.grid_on = !app->viewport.grid_on;
+        }
     } else if (strcmp(name, "resize") == 0) {
         int w, h;
         if (arg && tart_parse_wh(arg, &w, &h)) {
@@ -242,13 +251,16 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
     } else if (strcmp(name, "new") == 0) {
         if (tart_new_doc(app)) tart_clamp_view(app);
     } else if (strcmp(name, "save") == 0) {
+        /* Bare :save re-saves to known path, vim-:w style; prompt only when
+         * document never had one. :save <name> is save-as. */
         if (arg) tart_save_doc(app, arg);
+        else if (app->doc_path[0]) tart_save_doc(app, app->doc_path);
         else tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
     } else if (strcmp(name, "load") == 0) {
         if (arg) {
             if (tart_load_doc(app, arg)) tart_clamp_view(app);
         } else {
-            tart_open_prompt(app, PROMPT_LOAD, "untitled.tart");
+            tart_open_prompt(app, PROMPT_LOAD, app->doc_path[0] ? app->doc_path : "untitled.tart");
         }
     } else if (strcmp(name, "play") == 0) {
         tart_anim_action(app, ANIM_PLAY);
