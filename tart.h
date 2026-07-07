@@ -70,7 +70,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "deselect", NULL, "Clear current selection" },
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
-    { "grid", NULL, "Toggle grid overlay (WxH)" },
+    { "grid", NULL, "Cycle grid overlay (arg: WxH or iso)" },
     { "resize", NULL, "Resize canvas (WxH)" },
     { "new", NULL, "New blank file" },
     { "save", NULL, "Save to file" },
@@ -130,7 +130,12 @@ typedef enum {
     PROMPT_LOAD,
     PROMPT_CUSTOM_CHAR,
     PROMPT_FPS,
+    PROMPT_CONFIRM,     /* unsaved-changes guard: y runs pending_cmd, else cancel */
 } TartPromptMode;
+
+/* Grid overlay flavors: rect = straight lines every grid_w x grid_h cells;
+ * iso = 2:1 diagonals forming diamonds grid_w wide (grid_w/2 rows tall). */
+typedef enum { GRID_OFF, GRID_RECT, GRID_ISO } TartGridMode;
 
 /* One region of animation bar (frame/layer/playback controls row between
  * canvas and status bar); ANIM_NONE marks plain text. Same renderer/hit-test
@@ -198,7 +203,7 @@ static const TartPaletteCategory TART_PALETTE[] = {
  * white, gray, ROYGBIV, black. Values are xterm-256 indices; plain black (0)
  * skipped since Canvas.colors uses 0 as its own "no color" sentinel —
  * cube-black (16) stands in for it instead. */
-static const unsigned char TART_BASIC_COLORS[] = { 15, 244, 196, 208, 226, 46, 21, 57, 129, 16 };
+static const unsigned char TART_BASIC_COLORS[] = { 15, 250, 196, 208, 226, 46, 21, 57, 129, 16 };
 #define TART_BASIC_COLOR_COUNT (sizeof(TART_BASIC_COLORS) / sizeof(TART_BASIC_COLORS[0]))
 
 /* Discrete brush/eraser sizes for '-'/'=' cycle keys and size slider; shared
@@ -345,11 +350,17 @@ typedef struct {
     bool help_visible;
     int help_scroll;    /* first visible help line when overlay taller than terminal */
 
-    /* Grid overlay: dim guide dots over blank cells every grid_w x grid_h
-     * world cells. View-only — never touches document. Default 8x4 (~2:1
-     * cell aspect, so squares on screen; halves cleanly for iso diamonds). */
-    bool grid_on;
+    /* Grid overlay: dim guide dots over blank cells. View-only — never
+     * touches document. Default 8x4 (~2:1 cell aspect, so rect squares read
+     * square on screen and iso diamonds sit 8 wide x 4 tall). Move tool
+     * snaps its paste corner to grid steps whenever a grid is shown. */
+    TartGridMode grid_mode;
     int grid_w, grid_h;
+
+    /* Unsaved-changes guard: command PROMPT_CONFIRM re-runs on 'y'. */
+    char pending_cmd[16];
+    char pending_arg[256];
+    bool pending_has_arg;
     bool about_visible;
     bool history_visible;   /* undo/redo history viewer (Up/Down walk it live) */
 } Viewport;
@@ -1072,12 +1083,26 @@ void render(App *app) {
                     }
                 }
                 /* Grid overlay: dotted guide lines on cells still blank after
-                 * onion ghosting — pure view chrome, document untouched. */
-                if (ch_to_draw == L' ' && app->viewport.grid_on &&
-                    (world_x % app->viewport.grid_w == 0 ||
-                     world_y % app->viewport.grid_h == 0)) {
-                    ch_to_draw = L'·';
-                    attrs |= A_DIM;
+                 * onion ghosting — pure view chrome, document untouched.
+                 * Rect: straight lines every grid_w/grid_h. Iso: the two
+                 * 2:1-slope diagonal families x+2y and x-2y, each repeating
+                 * every grid_w — their crossings tile the plane with diamonds
+                 * grid_w wide and grid_w/2 rows tall. */
+                if (ch_to_draw == L' ' && app->viewport.grid_mode != GRID_OFF) {
+                    int gw = app->viewport.grid_w;
+                    bool on_line;
+                    if (app->viewport.grid_mode == GRID_RECT) {
+                        on_line = (world_x % gw == 0 ||
+                                   world_y % app->viewport.grid_h == 0);
+                    } else {
+                        int d1 = ((world_x + 2 * world_y) % gw + gw) % gw;
+                        int d2 = ((world_x - 2 * world_y) % gw + gw) % gw;
+                        on_line = (d1 <= 1 || d2 <= 1);    /* 2 cols per row step */
+                    }
+                    if (on_line) {
+                        ch_to_draw = L'·';
+                        attrs |= A_DIM;
+                    }
                 }
             } else {
                 attrs = A_DIM;
@@ -1743,6 +1768,7 @@ static const char *tart_prompt_label(TartPromptMode mode) {
         case PROMPT_LOAD:        return "Load file:";
         case PROMPT_CUSTOM_CHAR: return "Custom char (hex codepoint):";
         case PROMPT_FPS:         return "Playback FPS (1-60):";
+        case PROMPT_CONFIRM:     return "Discard unsaved changes? (y/N)";
         default:                 return "";
     }
 }
@@ -2079,45 +2105,27 @@ bool tart_load_doc(App *app, const char *path) {
 }
 
 void tart_draw_help_overlay(App *app) {
+    /* Compact key reference: one line per topic, fits a ~20-row terminal
+     * without scrolling. Prose explanations live in README, not here. */
     const char *lines[] = {
-        "TART - Terminal ASCII Rendering Tool",
+        "TART v" TART_VERSION "  key reference          (details: README)",
         "",
-        "MODE:  n normal   c command   p pan",
+        "Mode    n normal   c command   p pan (m toggles)   q quit",
+        "Cursor  h j k l   w/b x5   0/$ ends   g/G top/bottom",
+        "Pan     arrows   Ctrl+d/u half   PgUp/PgDn page   Home reset   End corner",
+        "Tools   d draw  e eraser  L line  C curve  r rect  E ellipse  T triangle",
+        "        f fill  s select  v move      Esc cancels a half-built gesture",
+        "Brush   t tip palette   -/= size   Tab shape   [ ] color cycle",
+        "Toggles F rect-fill / random-fill   c move cut/stamp",
+        "Draw    hold left mouse, or space+move   wheel scrolls (alt = horizontal)",
+        "Edit    u undo   U redo   H history viewer (Up/Down walk it)",
+        "Frames  < > step   a add   A dup   x del   Enter play   o onion   :fps N",
+        "Layers  { } step   :layer-add / :layer-del   space cell = transparent",
+        "Grid    :grid cycles off/rect/iso   :grid WxH size   move snaps when on",
+        "File    :new  :save [name]  :load <name>   name + * (unsaved) in status bar",
+        "Menus   Alt+letter or click   commands: : / or Ctrl+E, fuzzy, Enter runs",
         "",
-        "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
-        "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
-        "View    m toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
-        "        :grid toggles a dotted guide overlay; :grid WxH sets cell size (8x4)",
-        "Tools   d draw   e eraser   r rect   s select   v move (underlined letter)",
-        "Shapes  L line   C curve   E ellipse   T triangle - drag to place;",
-        "        curve: drag the endpoints, then move to bend, click to set;",
-        "        ellipse/triangle fit the dragged box (cells are ~2:1, so a",
-        "        round-looking circle needs a box about twice as wide as tall)",
-        "Fill    f bucket fill - click repaints the connected region with the",
-        "        fill char; F toggles random texture mode (each cell rolls a",
-        "        glyph from the fill char's palette row; click again re-rolls)",
-        "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
-        "        F rect fill toggle",
-        "Select  drag to select (stays outlined); Move: drag to stamp a copy,",
-        "        repeatable by default - c toggles cut mode (clears source, one-shot)",
-        "Draw    left-click hold to use tool   space+move = alt draw/pan   Esc cancels",
-        "Edit    u undo   U redo   H history viewer (Up/Down walk the timeline)",
-        "        one step per stroke/stamp; frame, layer, resize, load reset it",
-        "Color   [ ] cycle quick colors (white gray roygbiv black)   click a dot to jump",
-        "Anim    < > prev/next frame   a add blank   A duplicate   x delete",
-        "        Enter play/stop   o onion skin (ghost of previous frame)   :fps N",
-        "Layer   { } prev/next   Layer menu or :layer-add / :layer-del",
-        "        space is transparent - lower layers show through; edits hit the",
-        "        active layer only (see the anim bar / status readout)",
-        "Image   Image menu > Resize Canvas (WxH) - resizes every frame and layer",
-        "File    File menu > New/Save/Load, or :new / :save [name] / :load <name>",
-        "        bare :save reuses the current file - status bar shows name, * = unsaved",
-        "Menu    Alt+F/E/V/I/A/L/H or click to open, arrows to move, Enter, Esc closes",
-        "Cmd     : or Ctrl+E, fuzzy-searches as you type, Up/Down or wheel to pick,",
-        "          Enter or click a row to run (save, load, resize, play, fps,",
-        "          frame-add/dup/del, layer-add/del, onion, deselect, quit, ...)",
-        "",
-        "Up/Down/PgUp/PgDn scroll   any other key closes",
+        "Up/Down scroll if clipped   any other key closes",
     };
     int n = (int)(sizeof(lines) / sizeof(lines[0]));
 

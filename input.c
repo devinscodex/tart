@@ -207,6 +207,20 @@ static void tart_anim_action(App *app, TartAnimAction action) {
     }
 }
 
+/* Destructive commands (quit/new/load) call this first: with unsaved
+ * changes it stashes the command and opens the y/N confirm prompt instead.
+ * 'y' clears dirty and re-dispatches the stashed command, which then sails
+ * through this same check. */
+static bool tart_guard_unsaved(App *app, const char *name, const char *arg) {
+    if (!app->dirty) return false;
+    Viewport *vp = &app->viewport;
+    snprintf(vp->pending_cmd, sizeof(vp->pending_cmd), "%s", name);
+    if (arg) snprintf(vp->pending_arg, sizeof(vp->pending_arg), "%s", arg);
+    vp->pending_has_arg = (arg != NULL);
+    tart_open_prompt(app, PROMPT_CONFIRM, "");
+    return true;
+}
+
 /* Single dispatch point for every named command, reached from menu bar,
  * ':' palette, and Alt+letter menu selection alike — arg is text after
  * command's first space (e.g. a filename or "WxHeight"), or NULL when none
@@ -214,6 +228,7 @@ static void tart_anim_action(App *app, TartAnimAction action) {
  * prompt instead. */
 static void tart_execute_command(App *app, const char *name, const char *arg) {
     if (strcmp(name, "quit") == 0) {
+        if (tart_guard_unsaved(app, name, arg)) return;
         app->running = 0;
     } else if (strcmp(name, "help") == 0) {
         app->viewport.help_visible = true;
@@ -232,13 +247,16 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
     } else if (strcmp(name, "toggle-pan") == 0) {
         tart_toggle_pan(app);
     } else if (strcmp(name, "grid") == 0) {
+        Viewport *vp = &app->viewport;
         int w, h;
         if (arg && tart_parse_wh(arg, &w, &h)) {
-            app->viewport.grid_w = w;
-            app->viewport.grid_h = h;
-            app->viewport.grid_on = true;
+            vp->grid_w = w;
+            vp->grid_h = h;
+            vp->grid_mode = GRID_RECT;
+        } else if (arg && strcmp(arg, "iso") == 0) {
+            vp->grid_mode = GRID_ISO;
         } else {
-            app->viewport.grid_on = !app->viewport.grid_on;
+            vp->grid_mode = (vp->grid_mode + 1) % 3;    /* off > rect > iso */
         }
     } else if (strcmp(name, "resize") == 0) {
         int w, h;
@@ -249,6 +267,7 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
             tart_open_prompt(app, PROMPT_RESIZE, "");
         }
     } else if (strcmp(name, "new") == 0) {
+        if (tart_guard_unsaved(app, name, arg)) return;
         if (tart_new_doc(app)) tart_clamp_view(app);
     } else if (strcmp(name, "save") == 0) {
         /* Bare :save re-saves to known path, vim-:w style; prompt only when
@@ -257,6 +276,7 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         else if (app->doc_path[0]) tart_save_doc(app, app->doc_path);
         else tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
     } else if (strcmp(name, "load") == 0) {
+        if (tart_guard_unsaved(app, name, arg)) return;
         if (arg) {
             if (tart_load_doc(app, arg)) tart_clamp_view(app);
         } else {
@@ -358,13 +378,24 @@ static void tart_tool_select(App *app, int wx, int wy, bool left_press, bool lef
     }
 }
 
+static int tart_snap(int v, int step) {
+    int m = ((v % step) + step) % step;
+    return v - m + (m * 2 >= step ? step : 0);
+}
+
 /* Move tool: needs an existing selection (from tart_tool_select); dragging
  * previews buffer following cursor. In stamp mode (default, move_cut ==
  * false) release pastes a copy and selection stays put — repeatable, source
  * untouched. In cut mode release also clears source region and drops
- * selection — a one-shot true move. */
+ * selection — a one-shot true move. Visible grid snaps paste corner to
+ * nearest grid step — snapping wx/wy up front keeps drag preview and
+ * committed paste on identical cells. */
 static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
+    if (vp->grid_mode != GRID_OFF) {
+        wx = tart_snap(wx, vp->grid_w);
+        wy = tart_snap(wy, vp->grid_h);
+    }
     if (left_press && vp->has_selection) {
         vp->tool_dragging = true;
     }
@@ -905,6 +936,17 @@ void handle_input(App *app) {
         return;
     }
 
+    if (app->viewport.prompt_mode == PROMPT_CONFIRM && ch != KEY_MOUSE) {
+        Viewport *vp = &app->viewport;
+        vp->prompt_mode = PROMPT_NONE;
+        if (ch == 'y' || ch == 'Y') {
+            app->dirty = false;     /* explicit discard — guard now passes */
+            tart_execute_command(app, vp->pending_cmd,
+                                 vp->pending_has_arg ? vp->pending_arg : NULL);
+        }
+        return;
+    }
+
     if (app->viewport.prompt_mode != PROMPT_NONE && ch != KEY_MOUSE) {
         Viewport *vp = &app->viewport;
         if (ch == '\n' || ch == KEY_ENTER) {
@@ -1008,7 +1050,7 @@ void handle_input(App *app) {
         return;
     }
 
-    if (ch == ':' || ch == 5) {
+    if (ch == ':' || ch == '/' || ch == 5) {
         app->viewport.command_mode = 1;
         app->viewport.mode = 'c';
         app->viewport.command_len = 0;
@@ -1019,7 +1061,7 @@ void handle_input(App *app) {
     bool vim_cursor_moved = false;
 
     if (ch == 'q' || ch == 'Q') {
-        app->running = 0;
+        tart_execute_command(app, "quit", NULL);    /* routes through unsaved guard */
     }
     if (ch == ' ') {
         app->viewport.space_held = true;
