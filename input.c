@@ -63,8 +63,8 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
             if (vp->tool == TOOL_ERASER) vp->eraser_shape = (vp->eraser_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
             else vp->brush_shape = (vp->brush_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
             break;
-        case PANEL_RECT_FILL_TOGGLE:
-            vp->rect_filled = !vp->rect_filled;
+        case PANEL_SHAPE_FILL_TOGGLE:
+            vp->shape_filled = !vp->shape_filled;
             break;
         case PANEL_MOVE_CUT_TOGGLE:
             vp->move_cut = !vp->move_cut;
@@ -156,6 +156,26 @@ static void tart_clamp_view(App *app) {
     if (vp->offset_y > v_hi) vp->offset_y = v_hi;
 }
 
+/* Text after first space in a ':' buffer, or NULL — the command's arg. */
+static const char *tart_command_arg(const char *buf) {
+    const char *space = strchr(buf, ' ');
+    if (!space) return NULL;
+    const char *arg = space + 1;
+    while (*arg == ' ') arg++;
+    return *arg ? arg : NULL;
+}
+
+/* Leave ':' command mode and wipe its state — Enter, Esc, and result-row
+ * click all exit through here. */
+static void tart_close_command(Viewport *vp) {
+    vp->command_mode = 0;
+    vp->mode = 'n';
+    vp->command_len = 0;
+    vp->cmd_selected = 0;
+    vp->cmd_scroll_off = 0;
+    memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+}
+
 static void tart_open_prompt(App *app, TartPromptMode mode, const char *initial) {
     Viewport *vp = &app->viewport;
     vp->prompt_mode = mode;
@@ -207,10 +227,8 @@ static void tart_anim_action(App *app, TartAnimAction action) {
     }
 }
 
-/* Destructive commands (quit/new/load) call this first: with unsaved
- * changes it stashes the command and opens the y/N confirm prompt instead.
- * 'y' clears dirty and re-dispatches the stashed command, which then sails
- * through this same check. */
+/* quit/new/load call this first: dirty document stashes command, opens y/N
+ * confirm. 'y' clears dirty, re-dispatches — second pass sails through. */
 static bool tart_guard_unsaved(App *app, const char *name, const char *arg) {
     if (!app->dirty) return false;
     Viewport *vp = &app->viewport;
@@ -331,7 +349,7 @@ static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_
                 if (border) {
                     tart_draw_at(app, x, y, vp->brush_char);
                     tart_set_color(app, x, y, vp->current_color);
-                } else if (vp->rect_filled) {
+                } else if (vp->shape_filled) {
                     tart_draw_at(app, x, y, vp->fill_char);
                     tart_set_color(app, x, y, vp->current_color);
                 }
@@ -407,9 +425,8 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
     }
     if (left_release && vp->tool_dragging) {
         tart_undo_push(app, vp->move_cut ? "cut-move" : "stamp");
-        /* Blank buffer cells are transparent — paste lays only inked glyphs
-         * over canvas, selection rectangle's empty padding never clobbers
-         * existing art (same space-is-transparent rule layers use). */
+        /* Blank buffer cells transparent — paste lays only inked glyphs,
+         * selection rectangle's empty padding never clobbers canvas art. */
         for (int y = 0; y < vp->sel_h; y++) {
             for (int x = 0; x < vp->sel_w; x++) {
                 wchar_t ch = vp->sel_buffer[y * vp->sel_w + x];
@@ -453,9 +470,15 @@ static void tart_tool_shape(App *app, int wx, int wy, bool left_press, bool left
         vp->drag_cur_wy = wy;
     }
     if (left_release && vp->tool_dragging) {
-        struct TartShapeCommit ctx = { app, vp->brush_char, vp->current_color };
         tart_undo_push(app, (vp->tool == TOOL_LINE)    ? "line" :
                             (vp->tool == TOOL_ELLIPSE) ? "ellipse" : "triangle");
+        /* Fill first, outline over it — border glyph wins on shared cells. */
+        if (vp->shape_filled && (vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI)) {
+            struct TartShapeCommit fctx = { app, vp->fill_char, vp->current_color };
+            tart_shape_fill(vp->tool, vp->drag_start_wx, vp->drag_start_wy, wx, wy,
+                            tart_commit_plot, &fctx);
+        }
+        struct TartShapeCommit ctx = { app, vp->brush_char, vp->current_color };
         tart_shape_points(vp->tool, vp->drag_start_wx, vp->drag_start_wy, wx, wy, 0, 0,
                           tart_commit_plot, &ctx);
         vp->tool_dragging = false;
@@ -580,21 +603,9 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         if (left_press && sy >= popup_y && sy < popup_y + visible) {
             int mi = vp->cmd_scroll_off + (sy - popup_y);
             if (mi >= 0 && mi < match_count) {
-                const char *buf = vp->command_buffer;
-                const char *space = strchr(buf, ' ');
-                const char *arg = NULL;
-                if (space) {
-                    arg = space + 1;
-                    while (*arg == ' ') arg++;
-                    if (*arg == '\0') arg = NULL;
-                }
-                tart_execute_command(app, TART_COMMANDS[match_idx[mi]].name, arg);
-                vp->command_mode = 0;
-                vp->mode = 'n';
-                vp->command_len = 0;
-                vp->cmd_selected = 0;
-                vp->cmd_scroll_off = 0;
-                memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+                tart_execute_command(app, TART_COMMANDS[match_idx[mi]].name,
+                                     tart_command_arg(vp->command_buffer));
+                tart_close_command(vp);
             }
         }
         return;
@@ -892,16 +903,9 @@ void handle_input(App *app) {
     if (app->viewport.command_mode && ch != KEY_MOUSE) {
         Viewport *vp = &app->viewport;
         if (ch == '\n' || ch == KEY_ENTER) {
-            const char *buf = vp->command_buffer;
-            const char *space = strchr(buf, ' ');
-            const char *arg = NULL;
-            if (space) {
-                arg = space + 1;
-                while (*arg == ' ') arg++;
-                if (*arg == '\0') arg = NULL;
-            }
+            const char *arg = tart_command_arg(vp->command_buffer);
             char verb[64];
-            tart_command_verb(buf, verb, sizeof(verb));
+            tart_command_verb(vp->command_buffer, verb, sizeof(verb));
 
             int match_idx[TART_COMMAND_COUNT];
             int match_count = tart_command_matches(verb, match_idx);
@@ -911,19 +915,9 @@ void handle_input(App *app) {
                 tart_execute_command(app, TART_COMMANDS[match_idx[sel]].name, arg);
             }
 
-            vp->command_mode = 0;
-            vp->mode = 'n';
-            vp->command_len = 0;
-            vp->cmd_selected = 0;
-            vp->cmd_scroll_off = 0;
-            memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+            tart_close_command(vp);
         } else if (ch == 27) {
-            vp->command_mode = 0;
-            vp->mode = 'n';
-            vp->command_len = 0;
-            vp->cmd_selected = 0;
-            vp->cmd_scroll_off = 0;
-            memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+            tart_close_command(vp);
         } else if (ch == KEY_UP || ch == KEY_DOWN) {
             char verb[64];
             tart_command_verb(vp->command_buffer, verb, sizeof(verb));
@@ -1161,8 +1155,10 @@ void handle_input(App *app) {
     if (ch == 9) {
         tart_apply_panel_action(app, PANEL_SHAPE_TOGGLE, 0);
     }
-    if (ch == 'F' && app->viewport.tool == TOOL_RECT) {
-        tart_apply_panel_action(app, PANEL_RECT_FILL_TOGGLE, 0);
+    if (ch == 'F' && (app->viewport.tool == TOOL_RECT ||
+                      app->viewport.tool == TOOL_ELLIPSE ||
+                      app->viewport.tool == TOOL_TRI)) {
+        tart_apply_panel_action(app, PANEL_SHAPE_FILL_TOGGLE, 0);
     }
     if (ch == 'F' && app->viewport.tool == TOOL_FILL) {
         tart_apply_panel_action(app, PANEL_FILL_RANDOM_TOGGLE, 0);

@@ -32,7 +32,8 @@ by a small margin.
 | Tools | `d` draw, `e` eraser, `r` rect, `s` select, `v` move |
 | Shapes | `L` line, `C` curve (drag ends, then click to set the bend), `E` ellipse, `T` triangle — `Esc` cancels a half-built shape |
 | Fill | `f` bucket fill (click repaints the connected region), `F` toggles random texture mode |
-| Brush | `t` char palette, `-`/`=` size, `Tab` shape, `F` rect-fill, `c` move cut/stamp |
+| Brush | `t` char palette, `-`/`=` size, `Tab` shape, `F` shape fill (rect/ellipse/triangle), `c` move cut/stamp |
+| Triangle | apex follows the drag: release below the press row → points down, above → points up |
 | Edit | `u` undo, `U` redo, `H` history viewer (`Up`/`Down` walk the timeline live) — one step per stroke/stamp; structural ops reset history |
 | Color | `[`/`]` cycle the quick palette (white, gray, ROYGBIV, black), click a Color dot to jump |
 | Frames | `<`/`>` prev/next, `a` add blank, `A` duplicate, `x` delete, `Enter` play/stop, `o` onion skin, `:fps N` |

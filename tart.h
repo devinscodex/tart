@@ -167,7 +167,7 @@ typedef enum {
     PANEL_SIZE_INC,
     PANEL_SIZE_SET,      /* value = index into TART_BRUSH_SIZES */
     PANEL_SHAPE_TOGGLE,
-    PANEL_RECT_FILL_TOGGLE,
+    PANEL_SHAPE_FILL_TOGGLE,
     PANEL_FILL_CHAR_OPEN,
     PANEL_MOVE_CUT_TOGGLE,
     PANEL_FILL_RANDOM_TOGGLE,
@@ -293,7 +293,7 @@ typedef struct {
     BrushShape brush_shape;
     int eraser_size;
     BrushShape eraser_shape;
-    bool rect_filled;
+    bool shape_filled;
     wchar_t fill_char;
 
     /* Char-palette popup (pencil tip / rect fill character picker). */
@@ -354,10 +354,8 @@ typedef struct {
     bool help_visible;
     int help_scroll;    /* first visible help line when overlay taller than terminal */
 
-    /* Grid overlay: dim guide dots over blank cells. View-only — never
-     * touches document. Default 8x4 (~2:1 cell aspect, so rect squares read
-     * square on screen and iso diamonds sit 8 wide x 4 tall). Move tool
-     * snaps its paste corner to grid steps whenever a grid is shown. */
+    /* Grid overlay: dim dots over blank cells, view-only. Default 8x4 —
+     * reads square at 2:1 cell aspect; iso diamonds 8 wide x 4 tall. */
     TartGridMode grid_mode;
     int grid_w, grid_h;
     bool snap_on;           /* move-tool snap when a grid is shown (:snap) */
@@ -424,6 +422,7 @@ void tart_redo(App *app);
 void tart_undo_clear(App *app);
 typedef void (*TartPlotFn)(int wx, int wy, void *ctx);
 void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, int cy, TartPlotFn plot, void *ctx);
+void tart_shape_fill(TartTool tool, int x0, int y0, int x1, int y1, TartPlotFn plot, void *ctx);
 void tart_draw_history_overlay(App *app);
 void tart_flood_fill(App *app, int x, int y);
 void render(App *app);
@@ -877,16 +876,48 @@ void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, in
             break;
         }
         case TOOL_TRI: {
+            /* y stays unnormalized: apex rides drag row y1, base sits on
+             * press row y0 — drag up points up, drag down points down. */
             if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
-            if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
-            int mx = (x0 + x1) / 2;   /* apex at top-center, base along the bottom */
-            tart_plot_seg(mx, y0, x0, y1, plot, ctx);
-            tart_plot_seg(mx, y0, x1, y1, plot, ctx);
-            tart_plot_seg(x0, y1, x1, y1, plot, ctx);
+            int mx = (x0 + x1) / 2;
+            tart_plot_seg(mx, y1, x0, y0, plot, ctx);
+            tart_plot_seg(mx, y1, x1, y0, plot, ctx);
+            tart_plot_seg(x0, y0, x1, y0, plot, ctx);
             break;
         }
         default:
             break;
+    }
+}
+
+/* Interior cells of a filled ellipse/triangle — outline still comes from
+ * tart_shape_points with same args, so border and fill can use different
+ * glyphs. Triangle matches outline orientation: apex on y1, base on y0. */
+void tart_shape_fill(TartTool tool, int x0, int y0, int x1, int y1, TartPlotFn plot, void *ctx) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (tool == TOOL_ELLIPSE) {
+        if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+        double ecx = (x0 + x1) / 2.0, ecy = (y0 + y1) / 2.0;
+        double rx = (x1 - x0) / 2.0, ry = (y1 - y0) / 2.0;
+        if (rx < 0.5 || ry < 0.5) return;
+        for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++) {
+                double nx = (x - ecx) / rx, ny = (y - ecy) / ry;
+                if (nx * nx + ny * ny <= 1.0) plot(x, y, ctx);
+            }
+    } else if (tool == TOOL_TRI) {
+        int ax = (x0 + x1) / 2, ay = y1;    /* apex */
+        int ylo = (y0 < y1) ? y0 : y1, yhi = (y0 < y1) ? y1 : y0;
+        for (int y = ylo; y <= yhi; y++)
+            for (int x = x0; x <= x1; x++) {
+                /* Inside = all three edge cross-products share a sign. */
+                long d1 = (long)(x0 - ax) * (y - ay) - (long)(y0 - ay) * (x - ax);
+                long d2 = (long)(x1 - x0) * (y - y0);    /* base edge is horizontal */
+                long d3 = (long)(ax - x1) * (y - y0) - (long)(ay - y0) * (x - x1);
+                bool has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+                bool has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+                if (!(has_neg && has_pos)) plot(x, y, ctx);
+            }
     }
 }
 
@@ -976,16 +1007,16 @@ void tart_draw_box(int x, int y, int w, int h) {
     }
 }
 
-/* Plot callback for shape drag previews: draws brush char directly on
- * screen (caller sets dim/cyan attrs), clipped to viewport. */
-struct TartShapePreview { App *app; TartRect canvas_r; };
+/* Plot callback for shape drag previews: draws ch directly on screen
+ * (caller sets dim/cyan attrs), clipped to viewport. */
+struct TartShapePreview { App *app; TartRect canvas_r; wchar_t ch; };
 static void tart_preview_plot(int wx, int wy, void *vctx) {
     struct TartShapePreview *p = vctx;
     int sx = wx - p->app->viewport.offset_x + p->canvas_r.x;
     int sy = wy - p->app->viewport.offset_y + p->canvas_r.y;
     if (sx >= p->canvas_r.x && sx < p->canvas_r.x + p->canvas_r.w &&
         sy >= p->canvas_r.y && sy < p->canvas_r.y + p->canvas_r.h) {
-        tart_addwch(sy, sx, p->app->viewport.brush_char);
+        tart_addwch(sy, sx, p->ch);
     }
 }
 
@@ -1092,12 +1123,9 @@ void render(App *app) {
                         attrs |= A_DIM;
                     }
                 }
-                /* Grid overlay: dotted guide lines on cells still blank after
-                 * onion ghosting — pure view chrome, document untouched.
-                 * Rect: straight lines every grid_w/grid_h. Iso: the two
-                 * 2:1-slope diagonal families x+2y and x-2y, each repeating
-                 * every grid_w — their crossings tile the plane with diamonds
-                 * grid_w wide and grid_w/2 rows tall. */
+                /* Grid dots on cells still blank after onion. Rect: lines
+                 * every grid_w/grid_h. Iso: 2:1 diagonal families x±2y mod
+                 * grid_w — crossings tile diamonds grid_w wide, /2 tall. */
                 if (ch_to_draw == L' ' && app->viewport.grid_mode != GRID_OFF) {
                     int gw = app->viewport.grid_w;
                     bool on_line;
@@ -1170,7 +1198,7 @@ void render(App *app) {
             (vp->tool == TOOL_LINE || vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI || vp->tool == TOOL_CURVE);
         bool curve_bend = (vp->tool == TOOL_CURVE && vp->curve_pending);
         if (shape_drag || curve_bend) {
-            struct TartShapePreview pctx = { app, canvas_r };
+            struct TartShapePreview pctx = { app, canvas_r, vp->brush_char };
             attron(A_DIM | COLOR_PAIR(1));
             if (curve_bend) {
                 tart_shape_points(TOOL_CURVE, vp->drag_start_wx, vp->drag_start_wy,
@@ -1178,6 +1206,11 @@ void render(App *app) {
                                   vp->curve_cx, vp->curve_cy, tart_preview_plot, &pctx);
             } else {
                 TartTool t = (vp->tool == TOOL_CURVE) ? TOOL_LINE : vp->tool;
+                if (vp->shape_filled && (t == TOOL_ELLIPSE || t == TOOL_TRI)) {
+                    struct TartShapePreview fctx = { app, canvas_r, vp->fill_char };
+                    tart_shape_fill(t, vp->drag_start_wx, vp->drag_start_wy,
+                                    vp->drag_cur_wx, vp->drag_cur_wy, tart_preview_plot, &fctx);
+                }
                 tart_shape_points(t, vp->drag_start_wx, vp->drag_start_wy,
                                   vp->drag_cur_wx, vp->drag_cur_wy, 0, 0, tart_preview_plot, &pctx);
             }
@@ -1195,7 +1228,7 @@ void render(App *app) {
             for (int y = y0; y <= y1; y++) {
                 for (int x = x0; x <= x1; x++) {
                     bool border = (x == x0 || x == x1 || y == y0 || y == y1);
-                    if (!border && !app->viewport.rect_filled) continue;
+                    if (!border && !app->viewport.shape_filled) continue;
                     int sx = x - app->viewport.offset_x + canvas_r.x;
                     int sy = y - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
@@ -1476,12 +1509,12 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_DEC_X, TP_SIZE_DEC_X, PANEL_SIZE_DEC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_INC_X, TP_SIZE_INC_X, PANEL_SIZE_INC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
-    } else if (vp->tool == TOOL_LINE || vp->tool == TOOL_CURVE ||
-               vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
+    } else if (vp->tool == TOOL_LINE || vp->tool == TOOL_CURVE) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_CHAR_OPEN, 0 };
-    } else if (vp->tool == TOOL_RECT) {
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_RECT_FILL_TOGGLE, 0 };
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
+    } else if (vp->tool == TOOL_RECT || vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_CHAR_OPEN, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_SHAPE_FILL_TOGGLE, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
     } else if (vp->tool == TOOL_FILL) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_FILL_RANDOM_TOGGLE, 0 };
@@ -1528,9 +1561,8 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attron(a);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
         attroff(a);
-        /* Underline bound key where it occurs in label (case-insensitive,
-         * overprinted in key's own case so Eraser e / Ellipse E stay
-         * distinguishable) — key isn't always the first letter (Move = v). */
+        /* Underline bound key at its spot in label — not always first
+         * letter (Move = v); key's own case keeps Eraser e / Ellipse E apart. */
         int kpos = 0;
         for (int j = 0; tools[i].label[j]; j++) {
             if (tolower((unsigned char)tools[i].label[j]) == tolower((unsigned char)tools[i].key)) {
@@ -1566,12 +1598,10 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     } else if (vp->tool == TOOL_CURVE) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, vp->curve_pending ? "Click sets bend" : "Drag ends first");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
-    } else if (vp->tool == TOOL_RECT) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (F)", vp->rect_filled ? "on" : "off");
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
-    } else if (vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag bounding box");
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
+    } else if (vp->tool == TOOL_RECT || vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill: %s (F)", vp->shape_filled ? "on" : "off");
+        mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
     } else if (vp->tool == TOOL_FILL) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Click fills region");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->fill_char);
@@ -2136,7 +2166,7 @@ void tart_draw_help_overlay(App *app) {
         "Tools   d draw  e eraser  L line  C curve  r rect  E ellipse  T triangle",
         "        f fill  s select  v move      Esc cancels a half-built gesture",
         "Brush   t tip palette   -/= size   Tab shape   [ ] color cycle",
-        "Toggles F rect-fill / random-fill   c move cut/stamp",
+        "Toggles F shape fill (rect/ellipse/tri) or random fill   c move cut/stamp",
         "Draw    hold left mouse, or space+move   wheel scrolls (alt = horizontal)",
         "Edit    u undo   U redo   H history viewer (Up/Down walk it)",
         "Frames  < > step   a add   A dup   x del   Enter play   o onion   :fps N",
