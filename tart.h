@@ -70,6 +70,8 @@ static const TartCommand TART_COMMANDS[] = {
     { "deselect", NULL, "Clear current selection" },
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
+    { "grid", NULL, "Cycle grid overlay (arg: WxH or iso)" },
+    { "snap", NULL, "Toggle move-tool snap to grid" },
     { "resize", NULL, "Resize canvas (WxH)" },
     { "new", NULL, "New blank file" },
     { "save", NULL, "Save to file" },
@@ -82,6 +84,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "frame-del", NULL, "Delete frame" },
     { "layer-add", "la", "Add layer" },
     { "layer-del", NULL, "Delete layer" },
+    { "solo", NULL, "Dim ink from other layers" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
@@ -97,10 +100,10 @@ typedef struct {
 static const TartMenuDef TART_MENUS[] = {
     { "File",  { "new", "save", "load", "quit" },       4 },
     { "Edit",  { "undo", "redo", "history", "deselect" }, 4 },
-    { "View",  { "reset-view", "toggle-pan", "onion" }, 3 },
+    { "View",  { "reset-view", "toggle-pan", "grid", "snap", "onion" }, 5 },
     { "Image", { "resize" },                            1 },
     { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
-    { "Layer", { "layer-add", "layer-del" },            2 },
+    { "Layer", { "layer-add", "layer-del", "solo" },    3 },
     { "Help",  { "help", "about" },                     2 },
 };
 #define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
@@ -129,7 +132,12 @@ typedef enum {
     PROMPT_LOAD,
     PROMPT_CUSTOM_CHAR,
     PROMPT_FPS,
+    PROMPT_CONFIRM,     /* unsaved-changes guard: y runs pending_cmd, else cancel */
 } TartPromptMode;
+
+/* Grid overlay flavors: rect = straight lines every grid_w x grid_h cells;
+ * iso = 2:1 diagonals forming diamonds grid_w wide (grid_w/2 rows tall). */
+typedef enum { GRID_OFF, GRID_RECT, GRID_ISO } TartGridMode;
 
 /* One region of animation bar (frame/layer/playback controls row between
  * canvas and status bar); ANIM_NONE marks plain text. Same renderer/hit-test
@@ -137,7 +145,7 @@ typedef enum {
 typedef enum {
     ANIM_NONE,
     ANIM_FRAME_PREV, ANIM_FRAME_NEXT, ANIM_FRAME_ADD, ANIM_FRAME_DUP, ANIM_FRAME_DEL,
-    ANIM_LAYER_PREV, ANIM_LAYER_NEXT, ANIM_LAYER_ADD, ANIM_LAYER_DEL,
+    ANIM_LAYER_PREV, ANIM_LAYER_NEXT, ANIM_LAYER_ADD, ANIM_LAYER_DEL, ANIM_SOLO,
     ANIM_PLAY, ANIM_ONION, ANIM_FPS,
 } TartAnimAction;
 
@@ -160,7 +168,7 @@ typedef enum {
     PANEL_SIZE_INC,
     PANEL_SIZE_SET,      /* value = index into TART_BRUSH_SIZES */
     PANEL_SHAPE_TOGGLE,
-    PANEL_RECT_FILL_TOGGLE,
+    PANEL_SHAPE_FILL_TOGGLE,
     PANEL_FILL_CHAR_OPEN,
     PANEL_MOVE_CUT_TOGGLE,
     PANEL_FILL_RANDOM_TOGGLE,
@@ -197,7 +205,10 @@ static const TartPaletteCategory TART_PALETTE[] = {
  * white, gray, ROYGBIV, black. Values are xterm-256 indices; plain black (0)
  * skipped since Canvas.colors uses 0 as its own "no color" sentinel —
  * cube-black (16) stands in for it instead. */
-static const unsigned char TART_BASIC_COLORS[] = { 15, 244, 196, 208, 226, 46, 21, 57, 129, 16 };
+/* Gray is cube-gray 102 (#878787), not ramp 244/250: canvas pairs sit at
+ * 16 + index, and terminals reporting only 256 color pairs can't register
+ * pairs past 255 — palette indices >= 240 silently render garbage there. */
+static const unsigned char TART_BASIC_COLORS[] = { 15, 102, 196, 208, 226, 46, 21, 57, 129, 16 };
 #define TART_BASIC_COLOR_COUNT (sizeof(TART_BASIC_COLORS) / sizeof(TART_BASIC_COLORS[0]))
 
 /* Discrete brush/eraser sizes for '-'/'=' cycle keys and size slider; shared
@@ -283,7 +294,7 @@ typedef struct {
     BrushShape brush_shape;
     int eraser_size;
     BrushShape eraser_shape;
-    bool rect_filled;
+    bool shape_filled;
     wchar_t fill_char;
 
     /* Char-palette popup (pencil tip / rect fill character picker). */
@@ -343,6 +354,19 @@ typedef struct {
     bool stroke_open;       /* draw/erase gesture mid-flight; undo snapshot already taken */
     bool help_visible;
     int help_scroll;    /* first visible help line when overlay taller than terminal */
+
+    /* Grid overlay: dim dots over blank cells, view-only. Default 8x4 —
+     * reads square at 2:1 cell aspect; iso diamonds 8 wide x 4 tall. */
+    TartGridMode grid_mode;
+    int grid_w, grid_h;
+    bool snap_on;           /* move-tool snap when a grid is shown (:snap) */
+    bool mid_pan_held;      /* middle button held = transient pan drag */
+    bool solo_on;           /* dim ink from non-active layers (:solo) */
+
+    /* Unsaved-changes guard: command PROMPT_CONFIRM re-runs on 'y'. */
+    char pending_cmd[16];
+    char pending_arg[256];
+    bool pending_has_arg;
     bool about_visible;
     bool history_visible;   /* undo/redo history viewer (Up/Down walk it live) */
 } Viewport;
@@ -377,6 +401,9 @@ typedef struct {
     int undo_count;
     int redo_count;
 
+    char doc_path[256];     /* last save/load target; empty = never saved */
+    bool dirty;             /* edits since last save/load/new */
+
     Viewport viewport;
     int running;
 } App;
@@ -386,7 +413,7 @@ void cleanup_app(App *app);
 bool init_canvas(Canvas *c, int w, int h);
 void cleanup_canvas(Canvas *c);
 Canvas *tart_canvas(App *app);
-wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color);
+wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color, int *out_layer);
 bool tart_frame_add(App *app, bool dup);
 void tart_frame_del(App *app);
 bool tart_layer_add(App *app);
@@ -397,6 +424,7 @@ void tart_redo(App *app);
 void tart_undo_clear(App *app);
 typedef void (*TartPlotFn)(int wx, int wy, void *ctx);
 void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, int cy, TartPlotFn plot, void *ctx);
+void tart_shape_fill(TartTool tool, int x0, int y0, int x1, int y1, TartPlotFn plot, void *ctx);
 void tart_draw_history_overlay(App *app);
 void tart_flood_fill(App *app, int x, int y);
 void render(App *app);
@@ -455,17 +483,20 @@ Canvas *tart_canvas(App *app) {
 }
 
 /* Composited view of one frame's layer stack at (x,y): topmost non-space
- * glyph wins, space transparent. Caller guarantees bounds. */
-wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color) {
+ * glyph wins, space transparent. Caller guarantees bounds. out_layer (may
+ * be NULL) gets winning layer's index — solo view dims other layers. */
+wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color, int *out_layer) {
     for (int l = app->layer_count - 1; l >= 0; l--) {
         Canvas *c = &app->frames[frame].layers[l];
         wchar_t ch = c->cells[y * c->width + x];
         if (ch != L' ') {
             *out_color = c->colors[y * c->width + x];
+            if (out_layer) *out_layer = l;
             return ch;
         }
     }
     *out_color = 0;
+    if (out_layer) *out_layer = -1;
     return L' ';
 }
 
@@ -491,6 +522,7 @@ bool tart_frame_add(App *app, bool dup) {
     app->frames[at] = nf;
     app->frame_count++;
     app->cur_frame = at;
+    app->dirty = true;
     tart_undo_clear(app);
     return true;
 }
@@ -502,6 +534,7 @@ void tart_frame_del(App *app) {
             (size_t)(app->frame_count - app->cur_frame - 1) * sizeof(Frame));
     app->frame_count--;
     if (app->cur_frame >= app->frame_count) app->cur_frame = app->frame_count - 1;
+    app->dirty = true;
     tart_undo_clear(app);
 }
 
@@ -525,6 +558,7 @@ bool tart_layer_add(App *app) {
     }
     app->layer_count++;
     app->cur_layer = at;
+    app->dirty = true;
     tart_undo_clear(app);
     return true;
 }
@@ -539,6 +573,7 @@ void tart_layer_del(App *app) {
     }
     app->layer_count--;
     if (app->cur_layer >= app->layer_count) app->cur_layer = app->layer_count - 1;
+    app->dirty = true;
     tart_undo_clear(app);
 }
 
@@ -583,6 +618,7 @@ void tart_undo_push(App *app, const char *desc) {
     s.desc = desc;
     tart_undo_stack_push(app->undo_stack, &app->undo_count, s);
     while (app->redo_count > 0) tart_undo_free_state(&app->redo_stack[--app->redo_count]);
+    app->dirty = true;
 }
 
 /* Undo and redo are the same swap in opposite directions: pop snapshot,
@@ -659,8 +695,11 @@ void init_app(App *app) {
      * stay clear of chrome pairs above (COLORS/pairs here are 256/65536 per
      * terminfo — ample room). Index 0 in Canvas.colors means "no color /
      * default", never looked up as a pair. */
-    for (int i = 0; i < 256; i++) {
-        init_pair(16 + i, i, COLOR_BLACK);
+    /* Cap at COLOR_PAIRS: terminals advertising only 256 pairs can't hold
+     * the full 272 (16 chrome + 256 canvas) — skip what won't fit instead
+     * of issuing failing init_pair calls. */
+    for (int i = 0; i < 256 && 16 + i < COLOR_PAIRS; i++) {
+        init_pair((short)(16 + i), (short)i, COLOR_BLACK);
     }
 
     app->width = TART_DEFAULT_CANVAS_WIDTH;
@@ -689,6 +728,9 @@ void init_app(App *app) {
     vp->fill_char = L'#';
     vp->open_menu = -1;
     vp->mode = 'n';
+    vp->grid_w = 8;
+    vp->grid_h = 4;
+    vp->snap_on = true;
     app->running = 1;
 }
 
@@ -839,16 +881,48 @@ void tart_shape_points(TartTool tool, int x0, int y0, int x1, int y1, int cx, in
             break;
         }
         case TOOL_TRI: {
+            /* y stays unnormalized: apex rides drag row y1, base sits on
+             * press row y0 — drag up points up, drag down points down. */
             if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
-            if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
-            int mx = (x0 + x1) / 2;   /* apex at top-center, base along the bottom */
-            tart_plot_seg(mx, y0, x0, y1, plot, ctx);
-            tart_plot_seg(mx, y0, x1, y1, plot, ctx);
-            tart_plot_seg(x0, y1, x1, y1, plot, ctx);
+            int mx = (x0 + x1) / 2;
+            tart_plot_seg(mx, y1, x0, y0, plot, ctx);
+            tart_plot_seg(mx, y1, x1, y0, plot, ctx);
+            tart_plot_seg(x0, y0, x1, y0, plot, ctx);
             break;
         }
         default:
             break;
+    }
+}
+
+/* Interior cells of a filled ellipse/triangle — outline still comes from
+ * tart_shape_points with same args, so border and fill can use different
+ * glyphs. Triangle matches outline orientation: apex on y1, base on y0. */
+void tart_shape_fill(TartTool tool, int x0, int y0, int x1, int y1, TartPlotFn plot, void *ctx) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (tool == TOOL_ELLIPSE) {
+        if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+        double ecx = (x0 + x1) / 2.0, ecy = (y0 + y1) / 2.0;
+        double rx = (x1 - x0) / 2.0, ry = (y1 - y0) / 2.0;
+        if (rx < 0.5 || ry < 0.5) return;
+        for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++) {
+                double nx = (x - ecx) / rx, ny = (y - ecy) / ry;
+                if (nx * nx + ny * ny <= 1.0) plot(x, y, ctx);
+            }
+    } else if (tool == TOOL_TRI) {
+        int ax = (x0 + x1) / 2, ay = y1;    /* apex */
+        int ylo = (y0 < y1) ? y0 : y1, yhi = (y0 < y1) ? y1 : y0;
+        for (int y = ylo; y <= yhi; y++)
+            for (int x = x0; x <= x1; x++) {
+                /* Inside = all three edge cross-products share a sign. */
+                long d1 = (long)(x0 - ax) * (y - ay) - (long)(y0 - ay) * (x - ax);
+                long d2 = (long)(x1 - x0) * (y - y0);    /* base edge is horizontal */
+                long d3 = (long)(ax - x1) * (y - y0) - (long)(ay - y0) * (x - x1);
+                bool has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+                bool has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+                if (!(has_neg && has_pos)) plot(x, y, ctx);
+            }
     }
 }
 
@@ -938,16 +1012,16 @@ void tart_draw_box(int x, int y, int w, int h) {
     }
 }
 
-/* Plot callback for shape drag previews: draws brush char directly on
- * screen (caller sets dim/cyan attrs), clipped to viewport. */
-struct TartShapePreview { App *app; TartRect canvas_r; };
+/* Plot callback for shape drag previews: draws ch directly on screen
+ * (caller sets dim/cyan attrs), clipped to viewport. */
+struct TartShapePreview { App *app; TartRect canvas_r; wchar_t ch; };
 static void tart_preview_plot(int wx, int wy, void *vctx) {
     struct TartShapePreview *p = vctx;
     int sx = wx - p->app->viewport.offset_x + p->canvas_r.x;
     int sy = wy - p->app->viewport.offset_y + p->canvas_r.y;
     if (sx >= p->canvas_r.x && sx < p->canvas_r.x + p->canvas_r.w &&
         sy >= p->canvas_r.y && sy < p->canvas_r.y + p->canvas_r.h) {
-        tart_addwch(sy, sx, p->app->viewport.brush_char);
+        tart_addwch(sy, sx, p->ch);
     }
 }
 
@@ -1040,17 +1114,41 @@ void render(App *app) {
 
             if (world_x >= 0 && world_x < app->width && world_y >= 0 && world_y < app->height) {
                 unsigned char cell_color;
-                ch_to_draw = tart_composite(app, app->cur_frame, world_x, world_y, &cell_color);
+                int src_layer;
+                ch_to_draw = tart_composite(app, app->cur_frame, world_x, world_y, &cell_color, &src_layer);
                 if (cell_color != 0) color_pair = 16 + cell_color;
+                /* Solo view: ink from other layers dims, active layer pops. */
+                if (app->viewport.solo_on && src_layer >= 0 && src_layer != app->cur_layer) {
+                    attrs |= A_DIM;
+                }
                 /* Onion skin: where this frame is blank, ghost previous
                  * frame's composite in dim monochrome. */
                 if (ch_to_draw == L' ' && app->onion && !app->playing && app->frame_count > 1) {
                     int prev = (app->cur_frame + app->frame_count - 1) % app->frame_count;
                     unsigned char ghost_color;
-                    wchar_t ghost = tart_composite(app, prev, world_x, world_y, &ghost_color);
+                    wchar_t ghost = tart_composite(app, prev, world_x, world_y, &ghost_color, NULL);
                     (void)ghost_color;
                     if (ghost != L' ') {
                         ch_to_draw = ghost;
+                        attrs |= A_DIM;
+                    }
+                }
+                /* Grid dots on cells still blank after onion. Rect: lines
+                 * every grid_w/grid_h. Iso: 2:1 diagonal families x±2y mod
+                 * grid_w — crossings tile diamonds grid_w wide, /2 tall. */
+                if (ch_to_draw == L' ' && app->viewport.grid_mode != GRID_OFF) {
+                    int gw = app->viewport.grid_w;
+                    bool on_line;
+                    if (app->viewport.grid_mode == GRID_RECT) {
+                        on_line = (world_x % gw == 0 ||
+                                   world_y % app->viewport.grid_h == 0);
+                    } else {
+                        int d1 = ((world_x + 2 * world_y) % gw + gw) % gw;
+                        int d2 = ((world_x - 2 * world_y) % gw + gw) % gw;
+                        on_line = (d1 <= 1 || d2 <= 1);    /* 2 cols per row step */
+                    }
+                    if (on_line) {
+                        ch_to_draw = L'·';
                         attrs |= A_DIM;
                     }
                 }
@@ -1110,7 +1208,7 @@ void render(App *app) {
             (vp->tool == TOOL_LINE || vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI || vp->tool == TOOL_CURVE);
         bool curve_bend = (vp->tool == TOOL_CURVE && vp->curve_pending);
         if (shape_drag || curve_bend) {
-            struct TartShapePreview pctx = { app, canvas_r };
+            struct TartShapePreview pctx = { app, canvas_r, vp->brush_char };
             attron(A_DIM | COLOR_PAIR(1));
             if (curve_bend) {
                 tart_shape_points(TOOL_CURVE, vp->drag_start_wx, vp->drag_start_wy,
@@ -1118,6 +1216,11 @@ void render(App *app) {
                                   vp->curve_cx, vp->curve_cy, tart_preview_plot, &pctx);
             } else {
                 TartTool t = (vp->tool == TOOL_CURVE) ? TOOL_LINE : vp->tool;
+                if (vp->shape_filled && (t == TOOL_ELLIPSE || t == TOOL_TRI)) {
+                    struct TartShapePreview fctx = { app, canvas_r, vp->fill_char };
+                    tart_shape_fill(t, vp->drag_start_wx, vp->drag_start_wy,
+                                    vp->drag_cur_wx, vp->drag_cur_wy, tart_preview_plot, &fctx);
+                }
                 tart_shape_points(t, vp->drag_start_wx, vp->drag_start_wy,
                                   vp->drag_cur_wx, vp->drag_cur_wy, 0, 0, tart_preview_plot, &pctx);
             }
@@ -1135,7 +1238,7 @@ void render(App *app) {
             for (int y = y0; y <= y1; y++) {
                 for (int x = x0; x <= x1; x++) {
                     bool border = (x == x0 || x == x1 || y == y0 || y == y1);
-                    if (!border && !app->viewport.rect_filled) continue;
+                    if (!border && !app->viewport.shape_filled) continue;
                     int sx = x - app->viewport.offset_x + canvas_r.x;
                     int sy = y - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
@@ -1161,15 +1264,19 @@ void render(App *app) {
                 }
             }
         } else if (app->viewport.tool == TOOL_MOVE && app->viewport.has_selection) {
+            /* Blank cells skipped to match transparent paste in tart_tool_move
+             * — preview shows exactly what release will lay down. */
             for (int y = 0; y < app->viewport.sel_h; y++) {
                 for (int x = 0; x < app->viewport.sel_w; x++) {
+                    wchar_t ch = app->viewport.sel_buffer[y * app->viewport.sel_w + x];
+                    if (ch == L' ') continue;
                     int wx = app->viewport.drag_cur_wx + x;
                     int wy = app->viewport.drag_cur_wy + y;
                     int sx = wx - app->viewport.offset_x + canvas_r.x;
                     int sy = wy - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
                         attron(A_REVERSE | A_DIM);
-                        tart_addwch(sy, sx, app->viewport.sel_buffer[y * app->viewport.sel_w + x]);
+                        tart_addwch(sy, sx, ch);
                         attroff(A_REVERSE | A_DIM);
                     }
                 }
@@ -1229,6 +1336,16 @@ void render(App *app) {
         mvprintw(status_r.y, cx, "cursor[%4d,%4d]", app->viewport.vim_cursor_x, app->viewport.vim_cursor_y);
         attroff(COLOR_PAIR(5));
         cx += 18;
+
+        /* Document name + unsaved-star, vim-style. */
+        {
+            const char *name = app->doc_path[0] ? app->doc_path : "[untitled]";
+            attr_t a = COLOR_PAIR(5) | (app->dirty ? A_BOLD : A_NORMAL);
+            attron(a);
+            mvprintw(status_r.y, cx, "%s%s", name, app->dirty ? " *" : "");
+            attroff(a);
+            cx += (int)strlen(name) + (app->dirty ? 2 : 0) + 1;
+        }
 
         const char *hint = ": commands   ?/F1 help   q quit";
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
@@ -1402,12 +1519,12 @@ int tart_build_tool_panel(App *app, TartPanelRow rows[TOOL_PANEL_MAX_ROWS]) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_DEC_X, TP_SIZE_DEC_X, PANEL_SIZE_DEC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, TP_SIZE_INC_X, TP_SIZE_INC_X, PANEL_SIZE_INC, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_SHAPE_TOGGLE, 0 };
-    } else if (vp->tool == TOOL_LINE || vp->tool == TOOL_CURVE ||
-               vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
+    } else if (vp->tool == TOOL_LINE || vp->tool == TOOL_CURVE) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_CHAR_OPEN, 0 };
-    } else if (vp->tool == TOOL_RECT) {
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_RECT_FILL_TOGGLE, 0 };
-        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
+    } else if (vp->tool == TOOL_RECT || vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT1, -1, -1, PANEL_CHAR_OPEN, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_SHAPE_FILL_TOGGLE, 0 };
+        rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
     } else if (vp->tool == TOOL_FILL) {
         rows[n++] = (TartPanelRow){ TP_ROW_OPT2, -1, -1, PANEL_FILL_CHAR_OPEN, 0 };
         rows[n++] = (TartPanelRow){ TP_ROW_OPT3, -1, -1, PANEL_FILL_RANDOM_TOGGLE, 0 };
@@ -1454,12 +1571,17 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
         attron(a);
         mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%-*s", tool_r.w - 2, tools[i].label);
         attroff(a);
-        /* Underline the actual bound key, not just label's literal first
-         * letter — Eraser (e) and Ellipse (E) both start with same printable
-         * letter but differ by case, so label[0] alone can't tell them
-         * apart on screen. */
+        /* Underline bound key at its spot in label — not always first
+         * letter (Move = v); key's own case keeps Eraser e / Ellipse E apart. */
+        int kpos = 0;
+        for (int j = 0; tools[i].label[j]; j++) {
+            if (tolower((unsigned char)tools[i].label[j]) == tolower((unsigned char)tools[i].key)) {
+                kpos = j;
+                break;
+            }
+        }
         attron(a | A_UNDERLINE);
-        mvprintw(tool_r.y + tools[i].row, tool_r.x + 1, "%c", tools[i].key);
+        mvprintw(tool_r.y + tools[i].row, tool_r.x + 1 + kpos, "%c", tools[i].key);
         attroff(a | A_UNDERLINE);
     }
 
@@ -1486,12 +1608,10 @@ void tart_draw_tool_panel(App *app, TartRect tool_r) {
     } else if (vp->tool == TOOL_CURVE) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, vp->curve_pending ? "Click sets bend" : "Drag ends first");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
-    } else if (vp->tool == TOOL_RECT) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Fill: %s (F)", vp->rect_filled ? "on" : "off");
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
-    } else if (vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
-        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Drag bounding box");
-        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
+    } else if (vp->tool == TOOL_RECT || vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI) {
+        mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->brush_char);
+        mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Fill: %s (F)", vp->shape_filled ? "on" : "off");
+        mvprintw(tool_r.y + TP_ROW_OPT3, tool_r.x + 1, "Fill char: '%lc'", (wint_t)vp->fill_char);
     } else if (vp->tool == TOOL_FILL) {
         mvprintw(tool_r.y + TP_ROW_OPT1, tool_r.x + 1, "Click fills region");
         mvprintw(tool_r.y + TP_ROW_OPT2, tool_r.x + 1, "Char: '%lc'", (wint_t)vp->fill_char);
@@ -1571,6 +1691,7 @@ int tart_build_anim_bar(App *app, TartAnimItem items[TART_ANIM_MAX_ITEMS]) {
     n = tart_anim_append(items, n, &x, "}", 1, ANIM_LAYER_NEXT);
     n = tart_anim_append(items, n, &x, "+", 1, ANIM_LAYER_ADD);
     n = tart_anim_append(items, n, &x, "del", 3, ANIM_LAYER_DEL);
+    n = tart_anim_append(items, n, &x, "solo", 4, ANIM_SOLO);
     n = tart_anim_append(items, n, &x, "│", 1, ANIM_NONE);
     n = tart_anim_append(items, n, &x, app->playing ? "stop" : "play", 4, ANIM_PLAY);
     n = tart_anim_append(items, n, &x, app->onion ? "onion:on" : "onion:off", app->onion ? 8 : 9, ANIM_ONION);
@@ -1588,7 +1709,8 @@ void tart_draw_anim_bar(App *app, TartRect anim_r) {
 
     for (int i = 0; i < n; i++) {
         bool active = (items[i].action == ANIM_PLAY && app->playing) ||
-                      (items[i].action == ANIM_ONION && app->onion);
+                      (items[i].action == ANIM_ONION && app->onion) ||
+                      (items[i].action == ANIM_SOLO && app->viewport.solo_on);
         attr_t a = active ? (COLOR_PAIR(6) | A_BOLD)
                  : (items[i].action == ANIM_NONE) ? COLOR_PAIR(5)
                  : (COLOR_PAIR(5) | A_BOLD);
@@ -1708,6 +1830,7 @@ static const char *tart_prompt_label(TartPromptMode mode) {
         case PROMPT_LOAD:        return "Load file:";
         case PROMPT_CUSTOM_CHAR: return "Custom char (hex codepoint):";
         case PROMPT_FPS:         return "Playback FPS (1-60):";
+        case PROMPT_CONFIRM:     return "Unsaved changes - Enter save, d discard, Esc cancel";
         default:                 return "";
     }
 }
@@ -1837,6 +1960,7 @@ bool tart_resize_doc(App *app, int new_w, int new_h) {
     }
     app->width = new_w;
     app->height = new_h;
+    app->dirty = true;
     tart_undo_clear(app);
     return true;
 }
@@ -1871,6 +1995,8 @@ bool tart_new_doc(App *app) {
     app->viewport.sel_colors = NULL;
     app->viewport.has_selection = false;
 
+    app->doc_path[0] = '\0';
+    app->dirty = false;
     tart_undo_clear(app);
     return true;
 }
@@ -1941,6 +2067,9 @@ bool tart_save_doc(App *app, const char *path) {
     }
 
     fclose(f);
+    strncpy(app->doc_path, path, sizeof(app->doc_path) - 1);
+    app->doc_path[sizeof(app->doc_path) - 1] = '\0';
+    app->dirty = false;
     return true;
 }
 
@@ -2030,48 +2159,35 @@ bool tart_load_doc(App *app, const char *path) {
     app->height = h;
     app->fps = fps;
     app->playing = false;
+    strncpy(app->doc_path, path, sizeof(app->doc_path) - 1);
+    app->doc_path[sizeof(app->doc_path) - 1] = '\0';
+    app->dirty = false;
     tart_undo_clear(app);
     return true;
 }
 
 void tart_draw_help_overlay(App *app) {
+    /* Compact key reference: one line per topic, fits a ~20-row terminal
+     * without scrolling. Prose explanations live in README, not here. */
     const char *lines[] = {
-        "TART - Terminal ASCII Rendering Tool",
+        "TART v" TART_VERSION "  key reference          (details: README)",
         "",
-        "MODE:  n normal   c command   p pan",
+        "Mode    n normal   c command   p pan (m toggles)   q quit",
+        "Cursor  h j k l   w/b x5   0/$ ends   g/G top/bottom",
+        "Pan     arrows   middle-drag   Ctrl+d/u half   PgUp/PgDn page   Home reset",
+        "Tools   d draw  e eraser  L line  C curve  r rect  E ellipse  T triangle",
+        "        f fill  s select  v move      Esc cancels a half-built gesture",
+        "Brush   t tip palette   -/= size   Tab shape   [ ] color cycle",
+        "Toggles F shape fill (rect/ellipse/tri) or random fill   c move cut/stamp",
+        "Draw    hold left mouse, or space+move   wheel scrolls (alt = horizontal)",
+        "Edit    u undo   U redo   H history viewer (Up/Down walk it)",
+        "Frames  < > step   a add   A dup   x del   Enter play   o onion   :fps N",
+        "Layers  { } step   :layer-add / :layer-del   :solo dims other layers' ink",
+        "Grid    :grid cycles off/rect/iso   :grid WxH size   :snap toggles snapping",
+        "File    :new  :save [name]  :load <name>   name + * (unsaved) in status bar",
+        "Menus   Alt+letter or click   commands: : / or Ctrl+E, fuzzy, Enter runs",
         "",
-        "Move    h j k l   w/b +-5 horiz   0/$ line start/end   G/g bottom/top",
-        "Pan     arrows    Ctrl+d/u half page   PgUp/PgDn full page",
-        "View    m toggle view/pan   wheel scroll (alt/shift/tilt = horizontal)   Home reset",
-        "Tools   d draw   e eraser   r rect   s select   v move (underlined letter)",
-        "Shapes  L line   C curve   E ellipse   T triangle - drag to place;",
-        "        curve: drag the endpoints, then move to bend, click to set;",
-        "        ellipse/triangle fit the dragged box (cells are ~2:1, so a",
-        "        round-looking circle needs a box about twice as wide as tall)",
-        "Fill    f bucket fill - click repaints the connected region with the",
-        "        fill char; F toggles random texture mode (each cell rolls a",
-        "        glyph from the fill char's palette row; click again re-rolls)",
-        "Brush   t open tip palette (1-9 jump category)   -/= size (1-21)   Tab shape",
-        "        F rect fill toggle",
-        "Select  drag to select (stays outlined); Move: drag to stamp a copy,",
-        "        repeatable by default - c toggles cut mode (clears source, one-shot)",
-        "Draw    left-click hold to use tool   space+move = alt draw/pan   Esc cancels",
-        "Edit    u undo   U redo   H history viewer (Up/Down walk the timeline)",
-        "        one step per stroke/stamp; frame, layer, resize, load reset it",
-        "Color   [ ] cycle quick colors (white gray roygbiv black)   click a dot to jump",
-        "Anim    < > prev/next frame   a add blank   A duplicate   x delete",
-        "        Enter play/stop   o onion skin (ghost of previous frame)   :fps N",
-        "Layer   { } prev/next   Layer menu or :layer-add / :layer-del",
-        "        space is transparent - lower layers show through; edits hit the",
-        "        active layer only (see the anim bar / status readout)",
-        "Image   Image menu > Resize Canvas (WxH) - resizes every frame and layer",
-        "File    File menu > New/Save/Load, or :new / :save <name> / :load <name>",
-        "Menu    Alt+F/E/V/I/A/L/H or click to open, arrows to move, Enter, Esc closes",
-        "Cmd     : or Ctrl+E, fuzzy-searches as you type, Up/Down or wheel to pick,",
-        "          Enter or click a row to run (save, load, resize, play, fps,",
-        "          frame-add/dup/del, layer-add/del, onion, deselect, quit, ...)",
-        "",
-        "Up/Down/PgUp/PgDn scroll   any other key closes",
+        "Up/Down scroll if clipped   any other key closes",
     };
     int n = (int)(sizeof(lines) / sizeof(lines[0]));
 

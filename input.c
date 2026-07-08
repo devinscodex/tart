@@ -63,8 +63,8 @@ static void tart_apply_panel_action(App *app, TartPanelAction action, int value)
             if (vp->tool == TOOL_ERASER) vp->eraser_shape = (vp->eraser_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
             else vp->brush_shape = (vp->brush_shape == BRUSH_SQUARE) ? BRUSH_ROUND : BRUSH_SQUARE;
             break;
-        case PANEL_RECT_FILL_TOGGLE:
-            vp->rect_filled = !vp->rect_filled;
+        case PANEL_SHAPE_FILL_TOGGLE:
+            vp->shape_filled = !vp->shape_filled;
             break;
         case PANEL_MOVE_CUT_TOGGLE:
             vp->move_cut = !vp->move_cut;
@@ -156,6 +156,26 @@ static void tart_clamp_view(App *app) {
     if (vp->offset_y > v_hi) vp->offset_y = v_hi;
 }
 
+/* Text after first space in a ':' buffer, or NULL — the command's arg. */
+static const char *tart_command_arg(const char *buf) {
+    const char *space = strchr(buf, ' ');
+    if (!space) return NULL;
+    const char *arg = space + 1;
+    while (*arg == ' ') arg++;
+    return *arg ? arg : NULL;
+}
+
+/* Leave ':' command mode and wipe its state — Enter, Esc, and result-row
+ * click all exit through here. */
+static void tart_close_command(Viewport *vp) {
+    vp->command_mode = 0;
+    vp->mode = 'n';
+    vp->command_len = 0;
+    vp->cmd_selected = 0;
+    vp->cmd_scroll_off = 0;
+    memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+}
+
 static void tart_open_prompt(App *app, TartPromptMode mode, const char *initial) {
     Viewport *vp = &app->viewport;
     vp->prompt_mode = mode;
@@ -197,6 +217,7 @@ static void tart_anim_action(App *app, TartAnimAction action) {
         case ANIM_LAYER_NEXT: app->cur_layer = (app->cur_layer + 1) % app->layer_count; break;
         case ANIM_LAYER_ADD:  tart_layer_add(app); break;
         case ANIM_LAYER_DEL:  tart_layer_del(app); break;
+        case ANIM_SOLO:       app->viewport.solo_on = !app->viewport.solo_on; break;
         case ANIM_PLAY:
             app->playing = !app->playing;
             app->play_last_ms = tart_now_ms();
@@ -207,6 +228,18 @@ static void tart_anim_action(App *app, TartAnimAction action) {
     }
 }
 
+/* quit/new/load call this first: dirty document stashes command, opens y/N
+ * confirm. 'y' clears dirty, re-dispatches — second pass sails through. */
+static bool tart_guard_unsaved(App *app, const char *name, const char *arg) {
+    if (!app->dirty) return false;
+    Viewport *vp = &app->viewport;
+    snprintf(vp->pending_cmd, sizeof(vp->pending_cmd), "%s", name);
+    if (arg) snprintf(vp->pending_arg, sizeof(vp->pending_arg), "%s", arg);
+    vp->pending_has_arg = (arg != NULL);
+    tart_open_prompt(app, PROMPT_CONFIRM, "");
+    return true;
+}
+
 /* Single dispatch point for every named command, reached from menu bar,
  * ':' palette, and Alt+letter menu selection alike — arg is text after
  * command's first space (e.g. a filename or "WxHeight"), or NULL when none
@@ -214,6 +247,7 @@ static void tart_anim_action(App *app, TartAnimAction action) {
  * prompt instead. */
 static void tart_execute_command(App *app, const char *name, const char *arg) {
     if (strcmp(name, "quit") == 0) {
+        if (tart_guard_unsaved(app, name, arg)) return;
         app->running = 0;
     } else if (strcmp(name, "help") == 0) {
         app->viewport.help_visible = true;
@@ -231,6 +265,20 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         tart_reset_view(app);
     } else if (strcmp(name, "toggle-pan") == 0) {
         tart_toggle_pan(app);
+    } else if (strcmp(name, "grid") == 0) {
+        Viewport *vp = &app->viewport;
+        int w, h;
+        if (arg && tart_parse_wh(arg, &w, &h)) {
+            vp->grid_w = w;
+            vp->grid_h = h;
+            vp->grid_mode = GRID_RECT;
+        } else if (arg && strcmp(arg, "iso") == 0) {
+            vp->grid_mode = GRID_ISO;
+        } else {
+            vp->grid_mode = (vp->grid_mode + 1) % 3;    /* off > rect > iso */
+        }
+    } else if (strcmp(name, "snap") == 0) {
+        app->viewport.snap_on = !app->viewport.snap_on;
     } else if (strcmp(name, "resize") == 0) {
         int w, h;
         if (arg && tart_parse_wh(arg, &w, &h)) {
@@ -240,15 +288,20 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
             tart_open_prompt(app, PROMPT_RESIZE, "");
         }
     } else if (strcmp(name, "new") == 0) {
+        if (tart_guard_unsaved(app, name, arg)) return;
         if (tart_new_doc(app)) tart_clamp_view(app);
     } else if (strcmp(name, "save") == 0) {
+        /* Bare :save re-saves to known path, vim-:w style; prompt only when
+         * document never had one. :save <name> is save-as. */
         if (arg) tart_save_doc(app, arg);
+        else if (app->doc_path[0]) tart_save_doc(app, app->doc_path);
         else tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
     } else if (strcmp(name, "load") == 0) {
+        if (tart_guard_unsaved(app, name, arg)) return;
         if (arg) {
             if (tart_load_doc(app, arg)) tart_clamp_view(app);
         } else {
-            tart_open_prompt(app, PROMPT_LOAD, "untitled.tart");
+            tart_open_prompt(app, PROMPT_LOAD, app->doc_path[0] ? app->doc_path : "untitled.tart");
         }
     } else if (strcmp(name, "play") == 0) {
         tart_anim_action(app, ANIM_PLAY);
@@ -268,6 +321,8 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         tart_anim_action(app, ANIM_LAYER_ADD);
     } else if (strcmp(name, "layer-del") == 0) {
         tart_anim_action(app, ANIM_LAYER_DEL);
+    } else if (strcmp(name, "solo") == 0) {
+        tart_anim_action(app, ANIM_SOLO);
     }
 }
 
@@ -297,7 +352,7 @@ static void tart_tool_rect(App *app, int wx, int wy, bool left_press, bool left_
                 if (border) {
                     tart_draw_at(app, x, y, vp->brush_char);
                     tart_set_color(app, x, y, vp->current_color);
-                } else if (vp->rect_filled) {
+                } else if (vp->shape_filled) {
                     tart_draw_at(app, x, y, vp->fill_char);
                     tart_set_color(app, x, y, vp->current_color);
                 }
@@ -346,13 +401,24 @@ static void tart_tool_select(App *app, int wx, int wy, bool left_press, bool lef
     }
 }
 
+static int tart_snap(int v, int step) {
+    int m = ((v % step) + step) % step;
+    return v - m + (m * 2 >= step ? step : 0);
+}
+
 /* Move tool: needs an existing selection (from tart_tool_select); dragging
  * previews buffer following cursor. In stamp mode (default, move_cut ==
  * false) release pastes a copy and selection stays put — repeatable, source
  * untouched. In cut mode release also clears source region and drops
- * selection — a one-shot true move. */
+ * selection — a one-shot true move. Visible grid snaps paste corner to
+ * nearest grid step — snapping wx/wy up front keeps drag preview and
+ * committed paste on identical cells. */
 static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
+    if (vp->grid_mode != GRID_OFF && vp->snap_on) {
+        wx = tart_snap(wx, vp->grid_w);
+        wy = tart_snap(wy, vp->grid_h);
+    }
     if (left_press && vp->has_selection) {
         vp->tool_dragging = true;
     }
@@ -362,9 +428,13 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
     }
     if (left_release && vp->tool_dragging) {
         tart_undo_push(app, vp->move_cut ? "cut-move" : "stamp");
+        /* Blank buffer cells transparent — paste lays only inked glyphs,
+         * selection rectangle's empty padding never clobbers canvas art. */
         for (int y = 0; y < vp->sel_h; y++) {
             for (int x = 0; x < vp->sel_w; x++) {
-                tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
+                wchar_t ch = vp->sel_buffer[y * vp->sel_w + x];
+                if (ch == L' ') continue;
+                tart_draw_at(app, wx + x, wy + y, ch);
                 tart_set_color(app, wx + x, wy + y, vp->sel_colors[y * vp->sel_w + x]);
             }
         }
@@ -403,9 +473,15 @@ static void tart_tool_shape(App *app, int wx, int wy, bool left_press, bool left
         vp->drag_cur_wy = wy;
     }
     if (left_release && vp->tool_dragging) {
-        struct TartShapeCommit ctx = { app, vp->brush_char, vp->current_color };
         tart_undo_push(app, (vp->tool == TOOL_LINE)    ? "line" :
                             (vp->tool == TOOL_ELLIPSE) ? "ellipse" : "triangle");
+        /* Fill first, outline over it — border glyph wins on shared cells. */
+        if (vp->shape_filled && (vp->tool == TOOL_ELLIPSE || vp->tool == TOOL_TRI)) {
+            struct TartShapeCommit fctx = { app, vp->fill_char, vp->current_color };
+            tart_shape_fill(vp->tool, vp->drag_start_wx, vp->drag_start_wy, wx, wy,
+                            tart_commit_plot, &fctx);
+        }
+        struct TartShapeCommit ctx = { app, vp->brush_char, vp->current_color };
         tart_shape_points(vp->tool, vp->drag_start_wx, vp->drag_start_wy, wx, wy, 0, 0,
                           tart_commit_plot, &ctx);
         vp->tool_dragging = false;
@@ -490,12 +566,15 @@ static void tart_apply_mouse(App *app, int sx, int sy,
                               bool wheel_up, bool wheel_down,
                               bool wheel_left, bool wheel_right,
                               bool shift, bool ctrl, bool alt) {
-    (void)mid_press; (void)mid_release; (void)right_press; (void)right_release;
+    (void)right_press; (void)right_release;
     (void)ctrl;
     Viewport *vp = &app->viewport;
 
     if (left_press)    vp->left_click_held = true;
     if (left_release)  vp->left_click_held = false;
+    /* Middle-button hold = temporary pan drag, no mode switch needed. */
+    if (mid_press)     vp->mid_pan_held = true;
+    if (mid_release)   vp->mid_pan_held = false;
 
     /* Prompt owns all interaction while open (same as open dropdown menu
      * already does via click-away/dismiss path below) — button state above
@@ -527,21 +606,9 @@ static void tart_apply_mouse(App *app, int sx, int sy,
         if (left_press && sy >= popup_y && sy < popup_y + visible) {
             int mi = vp->cmd_scroll_off + (sy - popup_y);
             if (mi >= 0 && mi < match_count) {
-                const char *buf = vp->command_buffer;
-                const char *space = strchr(buf, ' ');
-                const char *arg = NULL;
-                if (space) {
-                    arg = space + 1;
-                    while (*arg == ' ') arg++;
-                    if (*arg == '\0') arg = NULL;
-                }
-                tart_execute_command(app, TART_COMMANDS[match_idx[mi]].name, arg);
-                vp->command_mode = 0;
-                vp->mode = 'n';
-                vp->command_len = 0;
-                vp->cmd_selected = 0;
-                vp->cmd_scroll_off = 0;
-                memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+                tart_execute_command(app, TART_COMMANDS[match_idx[mi]].name,
+                                     tart_command_arg(vp->command_buffer));
+                tart_close_command(vp);
             }
         }
         return;
@@ -633,6 +700,9 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     vp->vim_cursor_x = wx;
     vp->vim_cursor_y = wy;
 
+    /* Panel clicks consumed here — without the return, the press falls
+     * through to the active tool with wx = -9999 and arms a phantom drag
+     * from off-canvas (a line/shape then commits on next release). */
     if (left_press && sx >= tool_r.x && sx < tool_r.x + tool_r.w && sy >= tool_r.y && sy < tool_r.y + tool_r.h) {
         TartPanelRow rows[TOOL_PANEL_MAX_ROWS];
         int n = tart_build_tool_panel(app, rows);
@@ -644,11 +714,14 @@ static void tart_apply_mouse(App *app, int sx, int sy,
             tart_apply_panel_action(app, rows[i].action, rows[i].value);
             break;
         }
+        vp->last_mouse_screen_x = sx;
+        vp->last_mouse_screen_y = sy;
+        return;
     }
 
     bool first_event = (vp->last_mouse_screen_x == 0 && vp->last_mouse_screen_y == 0);
 
-    if (vp->is_dragging) {
+    if (vp->is_dragging || vp->mid_pan_held) {
         if (!first_event) {
             vp->offset_x -= (sx - vp->last_mouse_screen_x);
             vp->offset_y -= (sy - vp->last_mouse_screen_y);
@@ -839,16 +912,9 @@ void handle_input(App *app) {
     if (app->viewport.command_mode && ch != KEY_MOUSE) {
         Viewport *vp = &app->viewport;
         if (ch == '\n' || ch == KEY_ENTER) {
-            const char *buf = vp->command_buffer;
-            const char *space = strchr(buf, ' ');
-            const char *arg = NULL;
-            if (space) {
-                arg = space + 1;
-                while (*arg == ' ') arg++;
-                if (*arg == '\0') arg = NULL;
-            }
+            const char *arg = tart_command_arg(vp->command_buffer);
             char verb[64];
-            tart_command_verb(buf, verb, sizeof(verb));
+            tart_command_verb(vp->command_buffer, verb, sizeof(verb));
 
             int match_idx[TART_COMMAND_COUNT];
             int match_count = tart_command_matches(verb, match_idx);
@@ -858,19 +924,9 @@ void handle_input(App *app) {
                 tart_execute_command(app, TART_COMMANDS[match_idx[sel]].name, arg);
             }
 
-            vp->command_mode = 0;
-            vp->mode = 'n';
-            vp->command_len = 0;
-            vp->cmd_selected = 0;
-            vp->cmd_scroll_off = 0;
-            memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+            tart_close_command(vp);
         } else if (ch == 27) {
-            vp->command_mode = 0;
-            vp->mode = 'n';
-            vp->command_len = 0;
-            vp->cmd_selected = 0;
-            vp->cmd_scroll_off = 0;
-            memset(vp->command_buffer, 0, sizeof(vp->command_buffer));
+            tart_close_command(vp);
         } else if (ch == KEY_UP || ch == KEY_DOWN) {
             char verb[64];
             tart_command_verb(vp->command_buffer, verb, sizeof(verb));
@@ -893,6 +949,33 @@ void handle_input(App *app) {
         return;
     }
 
+    if (app->viewport.prompt_mode == PROMPT_CONFIRM && ch != KEY_MOUSE) {
+        Viewport *vp = &app->viewport;
+        vp->prompt_mode = PROMPT_NONE;
+        if (ch == '\n' || ch == KEY_ENTER || ch == 's' || ch == 'S' || ch == 'y' || ch == 'Y') {
+            /* Save is the default. Known path saves and runs pending command
+             * now; never-saved docs detour through the save prompt, which
+             * dispatches pending itself after a successful save. */
+            if (app->doc_path[0]) {
+                if (tart_save_doc(app, app->doc_path)) {
+                    tart_execute_command(app, vp->pending_cmd,
+                                         vp->pending_has_arg ? vp->pending_arg : NULL);
+                }
+                vp->pending_cmd[0] = '\0';
+            } else {
+                tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
+            }
+        } else if (ch == 'd' || ch == 'D' || ch == 'n' || ch == 'N') {
+            app->dirty = false;     /* explicit discard — guard now passes */
+            tart_execute_command(app, vp->pending_cmd,
+                                 vp->pending_has_arg ? vp->pending_arg : NULL);
+            vp->pending_cmd[0] = '\0';
+        } else {
+            vp->pending_cmd[0] = '\0';      /* Esc / anything else cancels */
+        }
+        return;
+    }
+
     if (app->viewport.prompt_mode != PROMPT_NONE && ch != KEY_MOUSE) {
         Viewport *vp = &app->viewport;
         if (ch == '\n' || ch == KEY_ENTER) {
@@ -906,7 +989,14 @@ void handle_input(App *app) {
                     break;
                 }
                 case PROMPT_SAVE:
-                    if (vp->prompt_buffer[0]) tart_save_doc(app, vp->prompt_buffer);
+                    /* Successful save runs any command stashed by the
+                     * unsaved-changes guard (save-then-quit flow). */
+                    if (vp->prompt_buffer[0] && tart_save_doc(app, vp->prompt_buffer) &&
+                        vp->pending_cmd[0]) {
+                        tart_execute_command(app, vp->pending_cmd,
+                                             vp->pending_has_arg ? vp->pending_arg : NULL);
+                        vp->pending_cmd[0] = '\0';
+                    }
                     break;
                 case PROMPT_LOAD:
                     if (vp->prompt_buffer[0] && tart_load_doc(app, vp->prompt_buffer)) tart_clamp_view(app);
@@ -931,6 +1021,7 @@ void handle_input(App *app) {
             vp->prompt_mode = PROMPT_NONE;
             vp->prompt_len = 0;
             memset(vp->prompt_buffer, 0, sizeof(vp->prompt_buffer));
+            vp->pending_cmd[0] = '\0';  /* cancelled save must not later fire a stashed quit */
         } else if ((ch == KEY_BACKSPACE || ch == 127) && vp->prompt_len > 0) {
             vp->prompt_buffer[--vp->prompt_len] = '\0';
         } else if (ch >= 32 && ch < 127 && vp->prompt_len < 255) {
@@ -996,7 +1087,7 @@ void handle_input(App *app) {
         return;
     }
 
-    if (ch == ':' || ch == 5) {
+    if (ch == ':' || ch == '/' || ch == 5) {
         app->viewport.command_mode = 1;
         app->viewport.mode = 'c';
         app->viewport.command_len = 0;
@@ -1007,7 +1098,7 @@ void handle_input(App *app) {
     bool vim_cursor_moved = false;
 
     if (ch == 'q' || ch == 'Q') {
-        app->running = 0;
+        tart_execute_command(app, "quit", NULL);    /* routes through unsaved guard */
     }
     if (ch == ' ') {
         app->viewport.space_held = true;
@@ -1097,8 +1188,10 @@ void handle_input(App *app) {
     if (ch == 9) {
         tart_apply_panel_action(app, PANEL_SHAPE_TOGGLE, 0);
     }
-    if (ch == 'F' && app->viewport.tool == TOOL_RECT) {
-        tart_apply_panel_action(app, PANEL_RECT_FILL_TOGGLE, 0);
+    if (ch == 'F' && (app->viewport.tool == TOOL_RECT ||
+                      app->viewport.tool == TOOL_ELLIPSE ||
+                      app->viewport.tool == TOOL_TRI)) {
+        tart_apply_panel_action(app, PANEL_SHAPE_FILL_TOGGLE, 0);
     }
     if (ch == 'F' && app->viewport.tool == TOOL_FILL) {
         tart_apply_panel_action(app, PANEL_FILL_RANDOM_TOGGLE, 0);

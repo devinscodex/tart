@@ -32,15 +32,18 @@ by a small margin.
 | Tools | `d` draw, `e` eraser, `r` rect, `s` select, `v` move |
 | Shapes | `L` line, `C` curve (drag ends, then click to set the bend), `E` ellipse, `T` triangle — `Esc` cancels a half-built shape |
 | Fill | `f` bucket fill (click repaints the connected region), `F` toggles random texture mode |
-| Brush | `t` char palette, `-`/`=` size, `Tab` shape, `F` rect-fill, `c` move cut/stamp |
+| Brush | `t` char palette, `-`/`=` size, `Tab` shape, `F` shape fill (rect/ellipse/triangle), `c` move cut/stamp |
+| Triangle | apex follows the drag: release below the press row → points down, above → points up |
 | Edit | `u` undo, `U` redo, `H` history viewer (`Up`/`Down` walk the timeline live) — one step per stroke/stamp; structural ops reset history |
 | Color | `[`/`]` cycle the quick palette (white, gray, ROYGBIV, black), click a Color dot to jump |
 | Frames | `<`/`>` prev/next, `a` add blank, `A` duplicate, `x` delete, `Enter` play/stop, `o` onion skin, `:fps N` |
-| Layers | `{`/`}` prev/next, `:layer-add` / `:layer-del` (or the Layer menu) |
+| Layers | `{`/`}` prev/next, `:layer-add` / `:layer-del` (or the Layer menu); `:solo` (or the anim-bar `solo` button) dims ink from non-active layers so the layer you're editing pops |
 | Cursor | `h j k l`, `w`/`b` (±5), `0`/`$`, `g`/`G` |
 | View | arrows pan, wheel scrolls, Alt+wheel / Shift+wheel / tilt-wheel scrolls horizontally, `m` pan mode, `Home` reset, `End` jump to bottom-right |
-| Draw | hold left mouse, or hold `space` while moving |
-| Command | `:` or `Ctrl+E`, fuzzy search, Enter runs (`quit`, `save`, `load`, `resize`, ...) |
+| Grid | `:grid` cycles off → rect → iso; `:grid WxH` sets rect cell size (default 8×4 ≈ square on screen); iso draws 2:1 diagonal diamonds `grid_w` wide. Move tool snaps to the grid while one is shown; `:snap` toggles that |
+| Draw | hold left mouse, or hold `space` while moving; middle-drag pans from any tool |
+| File | bare `:save` re-saves to the current file (vim `:w` style); status bar shows the name with `*` when unsaved; `quit`/`new`/`load` on a dirty document ask — Enter saves first (prompting for a name if needed), `d` discards, `Esc` cancels |
+| Command | `:`, `/` or `Ctrl+E`, fuzzy search, Enter runs (`quit`, `save`, `load`, `resize`, ...) |
 | Quit | `q` |
 
 ## Document model
