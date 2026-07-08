@@ -258,6 +258,8 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         } else {
             vp->grid_mode = (vp->grid_mode + 1) % 3;    /* off > rect > iso */
         }
+    } else if (strcmp(name, "snap") == 0) {
+        app->viewport.snap_on = !app->viewport.snap_on;
     } else if (strcmp(name, "resize") == 0) {
         int w, h;
         if (arg && tart_parse_wh(arg, &w, &h)) {
@@ -392,7 +394,7 @@ static int tart_snap(int v, int step) {
  * committed paste on identical cells. */
 static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_release) {
     Viewport *vp = &app->viewport;
-    if (vp->grid_mode != GRID_OFF) {
+    if (vp->grid_mode != GRID_OFF && vp->snap_on) {
         wx = tart_snap(wx, vp->grid_w);
         wy = tart_snap(wy, vp->grid_h);
     }
@@ -405,9 +407,14 @@ static void tart_tool_move(App *app, int wx, int wy, bool left_press, bool left_
     }
     if (left_release && vp->tool_dragging) {
         tart_undo_push(app, vp->move_cut ? "cut-move" : "stamp");
+        /* Blank buffer cells are transparent — paste lays only inked glyphs
+         * over canvas, selection rectangle's empty padding never clobbers
+         * existing art (same space-is-transparent rule layers use). */
         for (int y = 0; y < vp->sel_h; y++) {
             for (int x = 0; x < vp->sel_w; x++) {
-                tart_draw_at(app, wx + x, wy + y, vp->sel_buffer[y * vp->sel_w + x]);
+                wchar_t ch = vp->sel_buffer[y * vp->sel_w + x];
+                if (ch == L' ') continue;
+                tart_draw_at(app, wx + x, wy + y, ch);
                 tart_set_color(app, wx + x, wy + y, vp->sel_colors[y * vp->sel_w + x]);
             }
         }
@@ -533,12 +540,15 @@ static void tart_apply_mouse(App *app, int sx, int sy,
                               bool wheel_up, bool wheel_down,
                               bool wheel_left, bool wheel_right,
                               bool shift, bool ctrl, bool alt) {
-    (void)mid_press; (void)mid_release; (void)right_press; (void)right_release;
+    (void)right_press; (void)right_release;
     (void)ctrl;
     Viewport *vp = &app->viewport;
 
     if (left_press)    vp->left_click_held = true;
     if (left_release)  vp->left_click_held = false;
+    /* Middle-button hold = temporary pan drag, no mode switch needed. */
+    if (mid_press)     vp->mid_pan_held = true;
+    if (mid_release)   vp->mid_pan_held = false;
 
     /* Prompt owns all interaction while open (same as open dropdown menu
      * already does via click-away/dismiss path below) — button state above
@@ -691,7 +701,7 @@ static void tart_apply_mouse(App *app, int sx, int sy,
 
     bool first_event = (vp->last_mouse_screen_x == 0 && vp->last_mouse_screen_y == 0);
 
-    if (vp->is_dragging) {
+    if (vp->is_dragging || vp->mid_pan_held) {
         if (!first_event) {
             vp->offset_x -= (sx - vp->last_mouse_screen_x);
             vp->offset_y -= (sy - vp->last_mouse_screen_y);

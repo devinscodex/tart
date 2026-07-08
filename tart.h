@@ -71,6 +71,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "reset-view", NULL, "Reset pan offset to origin" },
     { "toggle-pan", NULL, "Toggle pan/normal mode" },
     { "grid", NULL, "Cycle grid overlay (arg: WxH or iso)" },
+    { "snap", NULL, "Toggle move-tool snap to grid" },
     { "resize", NULL, "Resize canvas (WxH)" },
     { "new", NULL, "New blank file" },
     { "save", NULL, "Save to file" },
@@ -98,7 +99,7 @@ typedef struct {
 static const TartMenuDef TART_MENUS[] = {
     { "File",  { "new", "save", "load", "quit" },       4 },
     { "Edit",  { "undo", "redo", "history", "deselect" }, 4 },
-    { "View",  { "reset-view", "toggle-pan", "grid", "onion" }, 4 },
+    { "View",  { "reset-view", "toggle-pan", "grid", "snap", "onion" }, 5 },
     { "Image", { "resize" },                            1 },
     { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
     { "Layer", { "layer-add", "layer-del" },            2 },
@@ -359,6 +360,8 @@ typedef struct {
      * snaps its paste corner to grid steps whenever a grid is shown. */
     TartGridMode grid_mode;
     int grid_w, grid_h;
+    bool snap_on;           /* move-tool snap when a grid is shown (:snap) */
+    bool mid_pan_held;      /* middle button held = transient pan drag */
 
     /* Unsaved-changes guard: command PROMPT_CONFIRM re-runs on 'y'. */
     char pending_cmd[16];
@@ -723,6 +726,7 @@ void init_app(App *app) {
     vp->mode = 'n';
     vp->grid_w = 8;
     vp->grid_h = 4;
+    vp->snap_on = true;
     app->running = 1;
 }
 
@@ -1217,15 +1221,19 @@ void render(App *app) {
                 }
             }
         } else if (app->viewport.tool == TOOL_MOVE && app->viewport.has_selection) {
+            /* Blank cells skipped to match transparent paste in tart_tool_move
+             * — preview shows exactly what release will lay down. */
             for (int y = 0; y < app->viewport.sel_h; y++) {
                 for (int x = 0; x < app->viewport.sel_w; x++) {
+                    wchar_t ch = app->viewport.sel_buffer[y * app->viewport.sel_w + x];
+                    if (ch == L' ') continue;
                     int wx = app->viewport.drag_cur_wx + x;
                     int wy = app->viewport.drag_cur_wy + y;
                     int sx = wx - app->viewport.offset_x + canvas_r.x;
                     int sy = wy - app->viewport.offset_y + canvas_r.y;
                     if (sx >= canvas_r.x && sx < canvas_r.x + canvas_r.w && sy >= canvas_r.y && sy < canvas_r.y + canvas_r.h) {
                         attron(A_REVERSE | A_DIM);
-                        tart_addwch(sy, sx, app->viewport.sel_buffer[y * app->viewport.sel_w + x]);
+                        tart_addwch(sy, sx, ch);
                         attroff(A_REVERSE | A_DIM);
                     }
                 }
@@ -2124,7 +2132,7 @@ void tart_draw_help_overlay(App *app) {
         "",
         "Mode    n normal   c command   p pan (m toggles)   q quit",
         "Cursor  h j k l   w/b x5   0/$ ends   g/G top/bottom",
-        "Pan     arrows   Ctrl+d/u half   PgUp/PgDn page   Home reset   End corner",
+        "Pan     arrows   middle-drag   Ctrl+d/u half   PgUp/PgDn page   Home reset",
         "Tools   d draw  e eraser  L line  C curve  r rect  E ellipse  T triangle",
         "        f fill  s select  v move      Esc cancels a half-built gesture",
         "Brush   t tip palette   -/= size   Tab shape   [ ] color cycle",
@@ -2133,7 +2141,7 @@ void tart_draw_help_overlay(App *app) {
         "Edit    u undo   U redo   H history viewer (Up/Down walk it)",
         "Frames  < > step   a add   A dup   x del   Enter play   o onion   :fps N",
         "Layers  { } step   :layer-add / :layer-del   space cell = transparent",
-        "Grid    :grid cycles off/rect/iso   :grid WxH size   move snaps when on",
+        "Grid    :grid cycles off/rect/iso   :grid WxH size   :snap toggles snapping",
         "File    :new  :save [name]  :load <name>   name + * (unsaved) in status bar",
         "Menus   Alt+letter or click   commands: : / or Ctrl+E, fuzzy, Enter runs",
         "",

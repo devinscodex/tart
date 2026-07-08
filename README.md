@@ -39,8 +39,8 @@ by a small margin.
 | Layers | `{`/`}` prev/next, `:layer-add` / `:layer-del` (or the Layer menu) |
 | Cursor | `h j k l`, `w`/`b` (±5), `0`/`$`, `g`/`G` |
 | View | arrows pan, wheel scrolls, Alt+wheel / Shift+wheel / tilt-wheel scrolls horizontally, `m` pan mode, `Home` reset, `End` jump to bottom-right |
-| Grid | `:grid` cycles off → rect → iso; `:grid WxH` sets rect cell size (default 8×4 ≈ square on screen); iso draws 2:1 diagonal diamonds `grid_w` wide. Move tool snaps to the grid while one is shown |
-| Draw | hold left mouse, or hold `space` while moving |
+| Grid | `:grid` cycles off → rect → iso; `:grid WxH` sets rect cell size (default 8×4 ≈ square on screen); iso draws 2:1 diagonal diamonds `grid_w` wide. Move tool snaps to the grid while one is shown; `:snap` toggles that |
+| Draw | hold left mouse, or hold `space` while moving; middle-drag pans from any tool |
 | File | bare `:save` re-saves to the current file (vim `:w` style); status bar shows the name with `*` when unsaved; `quit`/`new`/`load` ask `y/N` before discarding unsaved changes |
 | Command | `:`, `/` or `Ctrl+E`, fuzzy search, Enter runs (`quit`, `save`, `load`, `resize`, ...) |
 | Quit | `q` |
