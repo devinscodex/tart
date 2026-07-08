@@ -217,6 +217,7 @@ static void tart_anim_action(App *app, TartAnimAction action) {
         case ANIM_LAYER_NEXT: app->cur_layer = (app->cur_layer + 1) % app->layer_count; break;
         case ANIM_LAYER_ADD:  tart_layer_add(app); break;
         case ANIM_LAYER_DEL:  tart_layer_del(app); break;
+        case ANIM_SOLO:       app->viewport.solo_on = !app->viewport.solo_on; break;
         case ANIM_PLAY:
             app->playing = !app->playing;
             app->play_last_ms = tart_now_ms();
@@ -320,6 +321,8 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         tart_anim_action(app, ANIM_LAYER_ADD);
     } else if (strcmp(name, "layer-del") == 0) {
         tart_anim_action(app, ANIM_LAYER_DEL);
+    } else if (strcmp(name, "solo") == 0) {
+        tart_anim_action(app, ANIM_SOLO);
     }
 }
 
@@ -697,6 +700,9 @@ static void tart_apply_mouse(App *app, int sx, int sy,
     vp->vim_cursor_x = wx;
     vp->vim_cursor_y = wy;
 
+    /* Panel clicks consumed here — without the return, the press falls
+     * through to the active tool with wx = -9999 and arms a phantom drag
+     * from off-canvas (a line/shape then commits on next release). */
     if (left_press && sx >= tool_r.x && sx < tool_r.x + tool_r.w && sy >= tool_r.y && sy < tool_r.y + tool_r.h) {
         TartPanelRow rows[TOOL_PANEL_MAX_ROWS];
         int n = tart_build_tool_panel(app, rows);
@@ -708,6 +714,9 @@ static void tart_apply_mouse(App *app, int sx, int sy,
             tart_apply_panel_action(app, rows[i].action, rows[i].value);
             break;
         }
+        vp->last_mouse_screen_x = sx;
+        vp->last_mouse_screen_y = sy;
+        return;
     }
 
     bool first_event = (vp->last_mouse_screen_x == 0 && vp->last_mouse_screen_y == 0);
@@ -943,10 +952,26 @@ void handle_input(App *app) {
     if (app->viewport.prompt_mode == PROMPT_CONFIRM && ch != KEY_MOUSE) {
         Viewport *vp = &app->viewport;
         vp->prompt_mode = PROMPT_NONE;
-        if (ch == 'y' || ch == 'Y') {
+        if (ch == '\n' || ch == KEY_ENTER || ch == 's' || ch == 'S' || ch == 'y' || ch == 'Y') {
+            /* Save is the default. Known path saves and runs pending command
+             * now; never-saved docs detour through the save prompt, which
+             * dispatches pending itself after a successful save. */
+            if (app->doc_path[0]) {
+                if (tart_save_doc(app, app->doc_path)) {
+                    tart_execute_command(app, vp->pending_cmd,
+                                         vp->pending_has_arg ? vp->pending_arg : NULL);
+                }
+                vp->pending_cmd[0] = '\0';
+            } else {
+                tart_open_prompt(app, PROMPT_SAVE, "untitled.tart");
+            }
+        } else if (ch == 'd' || ch == 'D' || ch == 'n' || ch == 'N') {
             app->dirty = false;     /* explicit discard — guard now passes */
             tart_execute_command(app, vp->pending_cmd,
                                  vp->pending_has_arg ? vp->pending_arg : NULL);
+            vp->pending_cmd[0] = '\0';
+        } else {
+            vp->pending_cmd[0] = '\0';      /* Esc / anything else cancels */
         }
         return;
     }
@@ -964,7 +989,14 @@ void handle_input(App *app) {
                     break;
                 }
                 case PROMPT_SAVE:
-                    if (vp->prompt_buffer[0]) tart_save_doc(app, vp->prompt_buffer);
+                    /* Successful save runs any command stashed by the
+                     * unsaved-changes guard (save-then-quit flow). */
+                    if (vp->prompt_buffer[0] && tart_save_doc(app, vp->prompt_buffer) &&
+                        vp->pending_cmd[0]) {
+                        tart_execute_command(app, vp->pending_cmd,
+                                             vp->pending_has_arg ? vp->pending_arg : NULL);
+                        vp->pending_cmd[0] = '\0';
+                    }
                     break;
                 case PROMPT_LOAD:
                     if (vp->prompt_buffer[0] && tart_load_doc(app, vp->prompt_buffer)) tart_clamp_view(app);
@@ -989,6 +1021,7 @@ void handle_input(App *app) {
             vp->prompt_mode = PROMPT_NONE;
             vp->prompt_len = 0;
             memset(vp->prompt_buffer, 0, sizeof(vp->prompt_buffer));
+            vp->pending_cmd[0] = '\0';  /* cancelled save must not later fire a stashed quit */
         } else if ((ch == KEY_BACKSPACE || ch == 127) && vp->prompt_len > 0) {
             vp->prompt_buffer[--vp->prompt_len] = '\0';
         } else if (ch >= 32 && ch < 127 && vp->prompt_len < 255) {

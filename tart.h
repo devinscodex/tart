@@ -84,6 +84,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "frame-del", NULL, "Delete frame" },
     { "layer-add", "la", "Add layer" },
     { "layer-del", NULL, "Delete layer" },
+    { "solo", NULL, "Dim ink from other layers" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
@@ -102,7 +103,7 @@ static const TartMenuDef TART_MENUS[] = {
     { "View",  { "reset-view", "toggle-pan", "grid", "snap", "onion" }, 5 },
     { "Image", { "resize" },                            1 },
     { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
-    { "Layer", { "layer-add", "layer-del" },            2 },
+    { "Layer", { "layer-add", "layer-del", "solo" },    3 },
     { "Help",  { "help", "about" },                     2 },
 };
 #define TART_MENU_COUNT (sizeof(TART_MENUS) / sizeof(TART_MENUS[0]))
@@ -144,7 +145,7 @@ typedef enum { GRID_OFF, GRID_RECT, GRID_ISO } TartGridMode;
 typedef enum {
     ANIM_NONE,
     ANIM_FRAME_PREV, ANIM_FRAME_NEXT, ANIM_FRAME_ADD, ANIM_FRAME_DUP, ANIM_FRAME_DEL,
-    ANIM_LAYER_PREV, ANIM_LAYER_NEXT, ANIM_LAYER_ADD, ANIM_LAYER_DEL,
+    ANIM_LAYER_PREV, ANIM_LAYER_NEXT, ANIM_LAYER_ADD, ANIM_LAYER_DEL, ANIM_SOLO,
     ANIM_PLAY, ANIM_ONION, ANIM_FPS,
 } TartAnimAction;
 
@@ -360,6 +361,7 @@ typedef struct {
     int grid_w, grid_h;
     bool snap_on;           /* move-tool snap when a grid is shown (:snap) */
     bool mid_pan_held;      /* middle button held = transient pan drag */
+    bool solo_on;           /* dim ink from non-active layers (:solo) */
 
     /* Unsaved-changes guard: command PROMPT_CONFIRM re-runs on 'y'. */
     char pending_cmd[16];
@@ -411,7 +413,7 @@ void cleanup_app(App *app);
 bool init_canvas(Canvas *c, int w, int h);
 void cleanup_canvas(Canvas *c);
 Canvas *tart_canvas(App *app);
-wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color);
+wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color, int *out_layer);
 bool tart_frame_add(App *app, bool dup);
 void tart_frame_del(App *app);
 bool tart_layer_add(App *app);
@@ -481,17 +483,20 @@ Canvas *tart_canvas(App *app) {
 }
 
 /* Composited view of one frame's layer stack at (x,y): topmost non-space
- * glyph wins, space transparent. Caller guarantees bounds. */
-wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color) {
+ * glyph wins, space transparent. Caller guarantees bounds. out_layer (may
+ * be NULL) gets winning layer's index — solo view dims other layers. */
+wchar_t tart_composite(App *app, int frame, int x, int y, unsigned char *out_color, int *out_layer) {
     for (int l = app->layer_count - 1; l >= 0; l--) {
         Canvas *c = &app->frames[frame].layers[l];
         wchar_t ch = c->cells[y * c->width + x];
         if (ch != L' ') {
             *out_color = c->colors[y * c->width + x];
+            if (out_layer) *out_layer = l;
             return ch;
         }
     }
     *out_color = 0;
+    if (out_layer) *out_layer = -1;
     return L' ';
 }
 
@@ -1109,14 +1114,19 @@ void render(App *app) {
 
             if (world_x >= 0 && world_x < app->width && world_y >= 0 && world_y < app->height) {
                 unsigned char cell_color;
-                ch_to_draw = tart_composite(app, app->cur_frame, world_x, world_y, &cell_color);
+                int src_layer;
+                ch_to_draw = tart_composite(app, app->cur_frame, world_x, world_y, &cell_color, &src_layer);
                 if (cell_color != 0) color_pair = 16 + cell_color;
+                /* Solo view: ink from other layers dims, active layer pops. */
+                if (app->viewport.solo_on && src_layer >= 0 && src_layer != app->cur_layer) {
+                    attrs |= A_DIM;
+                }
                 /* Onion skin: where this frame is blank, ghost previous
                  * frame's composite in dim monochrome. */
                 if (ch_to_draw == L' ' && app->onion && !app->playing && app->frame_count > 1) {
                     int prev = (app->cur_frame + app->frame_count - 1) % app->frame_count;
                     unsigned char ghost_color;
-                    wchar_t ghost = tart_composite(app, prev, world_x, world_y, &ghost_color);
+                    wchar_t ghost = tart_composite(app, prev, world_x, world_y, &ghost_color, NULL);
                     (void)ghost_color;
                     if (ghost != L' ') {
                         ch_to_draw = ghost;
@@ -1681,6 +1691,7 @@ int tart_build_anim_bar(App *app, TartAnimItem items[TART_ANIM_MAX_ITEMS]) {
     n = tart_anim_append(items, n, &x, "}", 1, ANIM_LAYER_NEXT);
     n = tart_anim_append(items, n, &x, "+", 1, ANIM_LAYER_ADD);
     n = tart_anim_append(items, n, &x, "del", 3, ANIM_LAYER_DEL);
+    n = tart_anim_append(items, n, &x, "solo", 4, ANIM_SOLO);
     n = tart_anim_append(items, n, &x, "│", 1, ANIM_NONE);
     n = tart_anim_append(items, n, &x, app->playing ? "stop" : "play", 4, ANIM_PLAY);
     n = tart_anim_append(items, n, &x, app->onion ? "onion:on" : "onion:off", app->onion ? 8 : 9, ANIM_ONION);
@@ -1698,7 +1709,8 @@ void tart_draw_anim_bar(App *app, TartRect anim_r) {
 
     for (int i = 0; i < n; i++) {
         bool active = (items[i].action == ANIM_PLAY && app->playing) ||
-                      (items[i].action == ANIM_ONION && app->onion);
+                      (items[i].action == ANIM_ONION && app->onion) ||
+                      (items[i].action == ANIM_SOLO && app->viewport.solo_on);
         attr_t a = active ? (COLOR_PAIR(6) | A_BOLD)
                  : (items[i].action == ANIM_NONE) ? COLOR_PAIR(5)
                  : (COLOR_PAIR(5) | A_BOLD);
@@ -1818,7 +1830,7 @@ static const char *tart_prompt_label(TartPromptMode mode) {
         case PROMPT_LOAD:        return "Load file:";
         case PROMPT_CUSTOM_CHAR: return "Custom char (hex codepoint):";
         case PROMPT_FPS:         return "Playback FPS (1-60):";
-        case PROMPT_CONFIRM:     return "Discard unsaved changes? (y/N)";
+        case PROMPT_CONFIRM:     return "Unsaved changes - Enter save, d discard, Esc cancel";
         default:                 return "";
     }
 }
@@ -2170,7 +2182,7 @@ void tart_draw_help_overlay(App *app) {
         "Draw    hold left mouse, or space+move   wheel scrolls (alt = horizontal)",
         "Edit    u undo   U redo   H history viewer (Up/Down walk it)",
         "Frames  < > step   a add   A dup   x del   Enter play   o onion   :fps N",
-        "Layers  { } step   :layer-add / :layer-del   space cell = transparent",
+        "Layers  { } step   :layer-add / :layer-del   :solo dims other layers' ink",
         "Grid    :grid cycles off/rect/iso   :grid WxH size   :snap toggles snapping",
         "File    :new  :save [name]  :load <name>   name + * (unsaved) in status bar",
         "Menus   Alt+letter or click   commands: : / or Ctrl+E, fuzzy, Enter runs",
