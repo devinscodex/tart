@@ -453,6 +453,38 @@ bool tart_resize_doc(App *app, int new_w, int new_h);
 bool tart_new_doc(App *app);
 bool tart_save_doc(App *app, const char *path);
 bool tart_load_doc(App *app, const char *path);
+void tart_free_doc(App *app);
+
+/* --- Map blocks -----------------------------------------------------------
+ * A map composites many small .tart docs (grass, water, a campfire, ...)
+ * onto a grid. One App per unique block asset (BLOCKS entries are the
+ * dedup key), so every placement of the same block shares one animation
+ * clock -- same convention a caller already uses for e.g. a crowd of mobs
+ * sharing one shamble clock. TartMap is large (TART_MAP_MAX_BLOCKS Apps,
+ * ~31KB each) -- give it static or heap storage, not a plain local. */
+#define TART_MAP_MAX_BLOCKS 32
+#define TART_MAP_MAX_W 32
+#define TART_MAP_MAX_H 32
+
+typedef struct {
+    char id[16];
+    char path[256];
+    bool walkable;   /* whole-block flag; per-cell walkability not modeled yet */
+    App doc;
+} TartMapBlock;
+
+typedef struct {
+    int map_w, map_h;       /* grid size, in blocks */
+    int block_w, block_h;   /* declared block cell size, from the MAP header */
+    int block_count;
+    TartMapBlock blocks[TART_MAP_MAX_BLOCKS];
+    int grid[TART_MAP_MAX_H][TART_MAP_MAX_W];  /* index into blocks[]; -1 = empty */
+} TartMap;
+
+bool tart_map_load(TartMap *map, const char *path);
+void tart_map_free(TartMap *map);
+wchar_t tart_map_composite(TartMap *map, int wx, int wy, unsigned char *out_color);
+
 void tart_draw_box(int x, int y, int w, int h);
 int tart_command_matches(const char *query, int match_idx[TART_COMMAND_COUNT]);
 void tart_command_verb(const char *buf, char *out, size_t out_sz);
@@ -2164,6 +2196,133 @@ bool tart_load_doc(App *app, const char *path) {
     app->dirty = false;
     tart_undo_clear(app);
     return true;
+}
+
+/* tart_load_doc allocs a canvas per frame-layer; nothing else in this file
+ * used to free a whole doc (every prior caller rolled its own copy of this
+ * loop) -- one real version, here, so tart_map_free (below) and any future
+ * caller share it instead of drifting. */
+void tart_free_doc(App *app) {
+    if (app->width <= 0) return;
+    for (int f = 0; f < app->frame_count; f++)
+        for (int l = 0; l < app->layer_count; l++)
+            cleanup_canvas(&app->frames[f].layers[l]);
+    app->width = 0;
+}
+
+/* MAP file format (plain text, line-oriented, diffable -- same spirit as
+ * .tart itself):
+ *
+ *   <map_w> <map_h> <block_w> <block_h>
+ *   BLOCKS <block_count>
+ *   <id> <walkable 0|1> <path>          (repeated block_count times)
+ *   GRID
+ *   <map_h rows of map_w whitespace-separated ids, or "." for empty>
+ *
+ * Loads every BLOCKS path with tart_load_doc (fails the whole map on any
+ * bad block -- no silent partial map) and stages nothing: on any error the
+ * map is freed and false is returned, mirroring tart_load_doc's own
+ * doesn't-corrupt-what-you-had-open discipline one level up (a bad map
+ * file cleans up fully instead of leaving a half-loaded map for the
+ * caller to accidentally use).
+ */
+bool tart_map_load(TartMap *map, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+
+    memset(map, 0, sizeof(*map));
+    for (int y = 0; y < TART_MAP_MAX_H; y++)
+        for (int x = 0; x < TART_MAP_MAX_W; x++)
+            map->grid[y][x] = -1;
+
+    if (fscanf(f, "%d %d %d %d", &map->map_w, &map->map_h, &map->block_w, &map->block_h) != 4 ||
+        map->map_w < 1 || map->map_w > TART_MAP_MAX_W ||
+        map->map_h < 1 || map->map_h > TART_MAP_MAX_H ||
+        map->block_w < 1 || map->block_h < 1) {
+        fclose(f);
+        return false;
+    }
+
+    char marker[16];
+    int block_count = 0;
+    if (fscanf(f, "%15s %d", marker, &block_count) != 2 ||
+        strcmp(marker, "BLOCKS") != 0 ||
+        block_count < 0 || block_count > TART_MAP_MAX_BLOCKS) {
+        fclose(f);
+        return false;
+    }
+
+    for (int i = 0; i < block_count; i++) {
+        TartMapBlock *b = &map->blocks[i];
+        int walk = 0;
+        if (fscanf(f, "%15s %d %255s", b->id, &walk, b->path) != 3) {
+            fclose(f);
+            tart_map_free(map);
+            return false;
+        }
+        b->walkable = walk != 0;
+        if (!tart_load_doc(&b->doc, b->path)) {
+            fclose(f);
+            tart_map_free(map);
+            return false;
+        }
+    }
+    map->block_count = block_count;
+
+    if (fscanf(f, "%15s", marker) != 1 || strcmp(marker, "GRID") != 0) {
+        fclose(f);
+        tart_map_free(map);
+        return false;
+    }
+
+    for (int y = 0; y < map->map_h; y++) {
+        for (int x = 0; x < map->map_w; x++) {
+            char tok[16];
+            if (fscanf(f, "%15s", tok) != 1) {
+                fclose(f);
+                tart_map_free(map);
+                return false;
+            }
+            if (strcmp(tok, ".") == 0) { map->grid[y][x] = -1; continue; }
+            int found = -1;
+            for (int i = 0; i < map->block_count; i++)
+                if (strcmp(map->blocks[i].id, tok) == 0) { found = i; break; }
+            if (found < 0) {
+                fclose(f);
+                tart_map_free(map);
+                return false;
+            }
+            map->grid[y][x] = found;
+        }
+    }
+
+    fclose(f);
+    return true;
+}
+
+void tart_map_free(TartMap *map) {
+    for (int i = 0; i < map->block_count; i++)
+        tart_free_doc(&map->blocks[i].doc);
+    map->block_count = 0;
+}
+
+/* World cell (wx, wy) -> composited glyph, same top-down/space-transparent
+ * rule tart_composite already uses for a single doc's layers, one level up
+ * for blocks. Caller owns each block's animation clock (advance
+ * blocks[i].doc.cur_frame same as any other loaded App) -- this only reads
+ * whatever frame is currently selected, same division of responsibility
+ * wordsworn's sprite rendering already uses. */
+wchar_t tart_map_composite(TartMap *map, int wx, int wy, unsigned char *out_color) {
+    if (out_color) *out_color = 0;
+    if (wx < 0 || wy < 0 || map->block_w < 1 || map->block_h < 1) return L' ';
+    int bx = wx / map->block_w, by = wy / map->block_h;
+    if (bx >= map->map_w || by >= map->map_h) return L' ';
+    int bi = map->grid[by][bx];
+    if (bi < 0) return L' ';
+    TartMapBlock *b = &map->blocks[bi];
+    int lx = wx % map->block_w, ly = wy % map->block_h;
+    if (lx >= b->doc.width || ly >= b->doc.height) return L' ';
+    return tart_composite(&b->doc, b->doc.cur_frame, lx, ly, out_color, NULL);
 }
 
 void tart_draw_help_overlay(App *app) {

@@ -127,6 +127,39 @@ A v1 file (no fps, no markers) loads as one frame of one layer, and a
 one-frame/one-layer save is still v1-shaped. The format stays line-oriented
 and diffable; ragged layer counts are padded with blank layers on load.
 
+## Map format (`.map`) — blocks, no editor UI yet
+
+A map composites many small `.tart` documents ("blocks" — grass, water, a
+campfire) onto a grid. Same line-oriented, diffable spirit as `.tart`:
+
+    <map_w> <map_h> <block_w> <block_h>
+    BLOCKS <block_count>
+    <id> <walkable 0|1> <path>          repeated block_count times
+    GRID
+    <map_h rows of map_w whitespace-separated ids, or "." for empty>
+
+Loader: `tart_map_load`/`tart_map_free`/`tart_map_composite` in `tart.h`.
+Each `BLOCKS` entry loads once via `tart_load_doc` — every grid cell using
+that id shares the *same* loaded doc, so repeated placements (a pond made
+of several `water` cells) share one animation clock, same as how a crowd of
+mobs already shares one shamble clock in Wordsworn. `tart_map_composite`
+only reads whichever frame is currently selected; the caller advances each
+block's `cur_frame` on its own tick, same division of responsibility the
+game already uses for sprites. Walkability is a whole-block flag for now —
+no per-cell collision inside a block yet.
+
+`examples/grass.tart` + `examples/water.tart` + `examples/meadow.map` are a
+worked example (a 4×3-block meadow, 8×4 cells/block); `make maptest` builds
+a headless harness that loads it, prints two composited frames to stdout,
+and exits 1 on any load failure — no ncurses/terminal needed, good for a
+quick regression check after touching the loader.
+
+**Not built yet:** an in-TART authoring mode (click-to-place blocks on a
+map grid, reusing the existing tool-panel/command-dispatcher/undo
+machinery) and per-cell walkability. This slice is the file format +
+loader + proof-of-composite only, deliberately, so the format/render risk
+is retired before spending effort on UI.
+
 ## Code map
 
 | File | Contents |

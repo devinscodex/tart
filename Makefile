@@ -11,9 +11,12 @@ $(TARGET): $(SRC) tart.h
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LIBS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) maptest
 
 run: $(TARGET)
 	./$(TARGET)
 
-.PHONY: all clean run
+maptest: maptest.c tart.h
+	$(CC) $(CFLAGS) -o $@ maptest.c $(LIBS)
+
+.PHONY: all clean run maptest
