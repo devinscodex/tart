@@ -187,10 +187,13 @@ editor (hand-edit the `.map` file for that today).
 10 named palettes, ported from Slate (sibling project) so all three read
 from the same visual language: Light, Dark (default), Solarized
 Dark/Light, Gruvbox Dark/Light, Flexoki Dark/Light, Mosscairn Dark/Light.
-`:theme` (or View menu) cycles to the next one; the choice is written to
-`~/.tart-theme` (one line, plain text) and shared with Wordsworn — switch
-it in either app, the other picks it up on its next launch. Wordsworn
-itself cycles with the `t` key in-game.
+`:theme` (or View menu) cycles to the next one; the current theme's name
+is always visible in the status bar's bottom-right corner (`theme:Gruvbox
+Dark`, right next to the `: commands` hint) so cycling blind still shows
+where you landed. The choice is written to `~/.tart-theme` (one line,
+plain text) and shared with Wordsworn — switch it in either app, the
+other picks it up on its next launch. Wordsworn itself cycles with the
+`t` key in-game.
 
 Covers the whole body — menu bar, tool panel, rulers, status bar, overlay
 text (pairs 1-6) and every unpainted cell (`bkgd()`, so empty canvas

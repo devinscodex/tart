@@ -1433,7 +1433,9 @@ void render(App *app) {
             cx += (int)strlen(name) + (app->dirty ? 2 : 0) + 1;
         }
 
-        const char *hint = ": commands   ?/F1 help   q quit";
+        char hint[96];
+        snprintf(hint, sizeof(hint), "theme:%s   : commands   ?/F1 help   q quit",
+                 TART_THEMES[app->viewport.theme_idx].label);
         int hint_x = status_r.x + status_r.w - (int)strlen(hint) - 1;
         if (hint_x > cx) {
             attron(COLOR_PAIR(5));
