@@ -154,11 +154,33 @@ a headless harness that loads it, prints two composited frames to stdout,
 and exits 1 on any load failure — no ncurses/terminal needed, good for a
 quick regression check after touching the loader.
 
-**Not built yet:** an in-TART authoring mode (click-to-place blocks on a
-map grid, reusing the existing tool-panel/command-dispatcher/undo
-machinery) and per-cell walkability. This slice is the file format +
-loader + proof-of-composite only, deliberately, so the format/render risk
-is retired before spending effort on UI.
+`make mapedit` builds `mapedit`, a click-to-place authoring mode for
+`.map` files. Deliberately a separate small binary rather than a mode
+bolted onto `tart` itself — a map is a grid of block *references*, not
+pixels, so it doesn't share Canvas/Frame/Layer's data model; forcing it
+into the same tool-panel/undo machinery built for pixel drawing would
+have meant real surgery on `input.c` for a mismatched fit. It reuses the
+same loader/compositor `tart`/`maptest`/Wordsworn all share, and mirrors
+`init_app`'s ncurses setup, but the editing loop itself is new and much
+smaller — there is exactly one operation (place/clear a block at a grid
+cell), not a dozen drawing tools:
+
+```
+make mapedit
+./mapedit examples/meadow.map
+```
+
+Arrow keys/`hjkl` move the cursor one block at a time, `[`/`]`/Tab cycle
+which block is "loaded", Enter/Space place it, `x` clears, `u` undoes,
+`s` saves, `q` quits (prompts on unsaved changes). Left-click a legend
+row to pick a block, left-click the grid to move the cursor there *and*
+place immediately. No animation clock in this mode on purpose — block
+preview is static (frame 0); `getch()` runs in plain blocking mode, no
+`timeout()`/polling of any kind.
+
+**Not built yet:** per-cell walkability (still a whole-block flag),
+resizing the map or adding/removing `BLOCKS` entries from inside the
+editor (hand-edit the `.map` file for that today).
 
 ## Code map
 

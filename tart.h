@@ -482,6 +482,7 @@ typedef struct {
 } TartMap;
 
 bool tart_map_load(TartMap *map, const char *path);
+bool tart_map_save(TartMap *map, const char *path);
 void tart_map_free(TartMap *map);
 wchar_t tart_map_composite(TartMap *map, int wx, int wy, unsigned char *out_color);
 
@@ -2294,6 +2295,34 @@ bool tart_map_load(TartMap *map, const char *path) {
             }
             map->grid[y][x] = found;
         }
+    }
+
+    fclose(f);
+    return true;
+}
+
+/* Inverse of tart_map_load -- same format, so what one writes the other
+ * reads back byte-for-byte (modulo whitespace, which fscanf %s ignores).
+ * Blocks/paths are written as-loaded; only grid contents and dims can have
+ * changed by the time a caller saves. */
+bool tart_map_save(TartMap *map, const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+
+    fprintf(f, "%d %d %d %d\n", map->map_w, map->map_h, map->block_w, map->block_h);
+    fprintf(f, "BLOCKS %d\n", map->block_count);
+    for (int i = 0; i < map->block_count; i++) {
+        TartMapBlock *b = &map->blocks[i];
+        fprintf(f, "%s %d %s\n", b->id, b->walkable ? 1 : 0, b->path);
+    }
+    fprintf(f, "GRID\n");
+    for (int y = 0; y < map->map_h; y++) {
+        for (int x = 0; x < map->map_w; x++) {
+            if (x > 0) fputc(' ', f);
+            int bi = map->grid[y][x];
+            fputs(bi < 0 ? "." : map->blocks[bi].id, f);
+        }
+        fputc('\n', f);
     }
 
     fclose(f);
