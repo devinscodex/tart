@@ -146,9 +146,11 @@ static void tart_clamp_view(App *app) {
     Viewport *vp = &app->viewport;
     int view_w = CANVAS_VIEW_W;
     int view_h = CANVAS_VIEW_H;
-    int h_lo = -PAN_VOID_MARGIN;
+    /* Canvas smaller than the view can slide all the way to the far edge
+     * (plus margin), so it can sit centered — not just hug the top-left. */
+    int h_lo = ((app->width < view_w) ? (app->width - view_w) : 0) - PAN_VOID_MARGIN;
     int h_hi = (app->width > view_w) ? (app->width - view_w + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
-    int v_lo = -PAN_VOID_MARGIN;
+    int v_lo = ((app->height < view_h) ? (app->height - view_h) : 0) - PAN_VOID_MARGIN;
     int v_hi = (app->height > view_h) ? (app->height - view_h + PAN_VOID_MARGIN) : PAN_VOID_MARGIN;
     if (vp->offset_x < h_lo) vp->offset_x = h_lo;
     if (vp->offset_x > h_hi) vp->offset_x = h_hi;
@@ -323,6 +325,10 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
         tart_anim_action(app, ANIM_LAYER_DEL);
     } else if (strcmp(name, "solo") == 0) {
         tart_anim_action(app, ANIM_SOLO);
+    } else if (strcmp(name, "theme") == 0) {
+        app->viewport.theme_idx = (app->viewport.theme_idx + 1) % (int)TART_THEME_COUNT;
+        tart_apply_theme(app->viewport.theme_idx);
+        tart_theme_save(app->viewport.theme_idx);
     }
 }
 

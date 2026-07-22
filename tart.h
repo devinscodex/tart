@@ -85,6 +85,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "layer-add", "la", "Add layer" },
     { "layer-del", NULL, "Delete layer" },
     { "solo", NULL, "Dim ink from other layers" },
+    { "theme", NULL, "Cycle UI chrome theme" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
@@ -93,14 +94,14 @@ static const TartCommand TART_COMMANDS[] = {
  * Alt+<letter> mnemonic — must stay unique. */
 typedef struct {
     const char *label;
-    const char *items[5];
+    const char *items[6];
     int item_count;
 } TartMenuDef;
 
 static const TartMenuDef TART_MENUS[] = {
     { "File",  { "new", "save", "load", "quit" },       4 },
     { "Edit",  { "undo", "redo", "history", "deselect" }, 4 },
-    { "View",  { "reset-view", "toggle-pan", "grid", "snap", "onion" }, 5 },
+    { "View",  { "reset-view", "toggle-pan", "grid", "snap", "onion", "theme" }, 6 },
     { "Image", { "resize" },                            1 },
     { "Anim",  { "play", "frame-add", "frame-dup", "frame-del", "fps" }, 5 },
     { "Layer", { "layer-add", "layer-del", "solo" },    3 },
@@ -369,6 +370,7 @@ typedef struct {
     bool pending_has_arg;
     bool about_visible;
     bool history_visible;   /* undo/redo history viewer (Up/Down walk it live) */
+    int theme_idx;          /* index into TART_THEMES; UI preference, not document state */
 } Viewport;
 
 typedef struct {
@@ -485,6 +487,53 @@ bool tart_map_load(TartMap *map, const char *path);
 bool tart_map_save(TartMap *map, const char *path);
 void tart_map_free(TartMap *map);
 wchar_t tart_map_composite(TartMap *map, int wx, int wy, unsigned char *out_color);
+
+/* --- UI chrome themes -------------------------------------------------
+ * Named palettes ported from Slate's theme.py (sibling project, same
+ * Devin-picked sources: Solarized/Gruvbox/Flexoki's own published
+ * hex values, Mosscairn from runestone's mosscairn.css). Slate is
+ * Tkinter (exact hex); TART is a 256-color terminal, so each RGB
+ * triple below is matched to its nearest xterm-256 index at apply
+ * time (tart_apply_theme), not stored pre-quantized -- one conversion
+ * function, reused for every theme, instead of ten hand-picked
+ * palettes of magic pair numbers.
+ *
+ * Scope, deliberately narrow: this reskins CHROME only -- the two
+ * pairs TART's own init_app comments already call out by that name
+ * (pair 5 "menu chrome", pair 6 "hover/open highlight"; Wordsworn
+ * reuses pair 5 for its HUD divider bar the same way). It does NOT
+ * touch pairs 1-4 (each carries a specific functional meaning --
+ * onion-skin ghost dim, general text, inverse highlight, ruler/title
+ * accent -- retheming those without being able to see the result
+ * risks legibility regressions I can't verify from here) or the
+ * 16+i canvas-color ramp (that's document/sprite content, must never
+ * shift with a UI preference). fg drives both pairs' foreground;
+ * button_bg is pair 5's background, select_bg is pair 6's. */
+typedef struct {
+    const char *key;    /* stable id: persisted pref file, ":theme" arg */
+    const char *label;  /* menu/status display name */
+    unsigned char fg[3];
+    unsigned char button_bg[3];
+    unsigned char select_bg[3];
+} TartTheme;
+
+static const TartTheme TART_THEMES[] = {
+    { "light",          "Light",          {0,0,0},          {217,217,217}, {204,228,255} },
+    { "dark",           "Dark",           {232,232,232},    {60,60,60},    {58,90,122}   },
+    { "solarized_dark",  "Solarized Dark",  {131,148,150},   {7,54,66},     {38,139,210}  },
+    { "solarized_light", "Solarized Light", {101,123,131},   {238,232,213}, {38,139,210}  },
+    { "gruvbox_dark",    "Gruvbox Dark",    {235,219,178},   {60,56,54},    {131,165,152} },
+    { "gruvbox_light",   "Gruvbox Light",   {60,56,54},      {235,219,178}, {131,165,152} },
+    { "flexoki_dark",    "Flexoki Dark",    {230,228,217},   {40,39,38},    {32,94,166}   },
+    { "flexoki_light",   "Flexoki Light",   {16,15,15},      {242,240,229}, {32,94,166}   },
+    { "mosscairn_dark",  "Mosscairn Dark",  {232,228,208},   {9,57,71},     {163,183,42}  },
+    { "mosscairn_light", "Mosscairn Light", {28,26,22},      {138,129,111}, {88,118,58}   },
+};
+#define TART_THEME_COUNT (sizeof(TART_THEMES) / sizeof(TART_THEMES[0]))
+
+void tart_apply_theme(int idx);
+int tart_theme_load(void);          /* reads ~/.tart-theme, clamps to a valid index, default 1 (dark) */
+void tart_theme_save(int idx);
 
 void tart_draw_box(int x, int y, int w, int h);
 int tart_command_matches(const char *query, int match_idx[TART_COMMAND_COUNT]);
@@ -719,11 +768,13 @@ void init_app(App *app) {
     init_pair(2, COLOR_WHITE, COLOR_BLACK);
     init_pair(3, COLOR_BLACK, COLOR_WHITE);
     init_pair(4, COLOR_YELLOW, COLOR_BLACK);
-    /* Dark-slate menu chrome (pair 5) and hover/open highlight (pair 6),
-     * styled after dark code editor's menu bar instead of reversed-white
-     * classic-desktop look. */
-    init_pair(5, 253, 236);
-    init_pair(6, 255, 24);
+    /* Menu chrome (pair 5) and hover/open highlight (pair 6) -- default
+     * (253,236)/(255,24) dark-slate look now lives as TART_THEMES[1]
+     * "Dark" (tart_theme_load's own fallback), switchable via the
+     * ":theme" command or View menu. Loaded once here, applied both to
+     * ncurses (now) and the Viewport (below, after its own memset). */
+    int loaded_theme_idx = tart_theme_load();
+    tart_apply_theme(loaded_theme_idx);
     /* Canvas cell colors use dedicated 256-color palette, offset by 16 to
      * stay clear of chrome pairs above (COLORS/pairs here are 256/65536 per
      * terminfo — ample room). Index 0 in Canvas.colors means "no color /
@@ -753,6 +804,7 @@ void init_app(App *app) {
      * exceptions. */
     Viewport *vp = &app->viewport;
     memset(vp, 0, sizeof(*vp));
+    vp->theme_idx = loaded_theme_idx;
     vp->offset_x = -2;      /* start panned slightly out — canvas edge visible */
     vp->offset_y = -2;
     vp->brush_char = L'#';
@@ -2352,6 +2404,93 @@ wchar_t tart_map_composite(TartMap *map, int wx, int wy, unsigned char *out_colo
     int lx = wx % map->block_w, ly = wy % map->block_h;
     if (lx >= b->doc.width || ly >= b->doc.height) return L' ';
     return tart_composite(&b->doc, b->doc.cur_frame, lx, ly, out_color, NULL);
+}
+
+/* Nearest step in xterm-256's 6-level color cube (0,95,135,175,215,255),
+ * returned as its 0-5 index -- shared by all three RGB channels. */
+static int tart_xterm_cube_level(int v) {
+    static const int steps[6] = { 0, 95, 135, 175, 215, 255 };
+    int best = 0, best_d = abs(steps[0] - v);
+    for (int i = 1; i < 6; i++) {
+        int d = abs(steps[i] - v);
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    return best;
+}
+
+/* RGB -> nearest xterm-256 index, checking both the 6x6x6 color cube
+ * (16-231) and the 24-step grayscale ramp (232-255, value 8+10*i) and
+ * keeping whichever is closer by squared distance -- a near-gray input
+ * (most UI chrome colors are) is usually a much better match on the
+ * ramp than forced into the cube. Standard, widely-used approach; not
+ * theme-specific, so it only needs writing once. */
+static int tart_xterm256_from_rgb(int r, int g, int b) {
+    static const int steps[6] = { 0, 95, 135, 175, 215, 255 };
+    int ri = tart_xterm_cube_level(r), gi = tart_xterm_cube_level(g), bi = tart_xterm_cube_level(b);
+    int cube_idx = 16 + 36 * ri + 6 * gi + bi;
+    int cr = steps[ri], cg = steps[gi], cb = steps[bi];
+    long cube_dist = (long)(r - cr) * (r - cr) + (long)(g - cg) * (g - cg) + (long)(b - cb) * (b - cb);
+
+    int gray = (r + g + b) / 3;
+    int gray_idx = (gray - 8 + 5) / 10;
+    if (gray_idx < 0) gray_idx = 0;
+    if (gray_idx > 23) gray_idx = 23;
+    int gray_val = 8 + 10 * gray_idx;
+    long gray_dist = (long)(r - gray_val) * (r - gray_val) + (long)(g - gray_val) * (g - gray_val) + (long)(b - gray_val) * (b - gray_val);
+
+    return (cube_dist <= gray_dist) ? cube_idx : (232 + gray_idx);
+}
+
+/* Applies TART_THEMES[idx] to the two pairs TART's own comments already
+ * call "chrome" (5 = menu/panel bar, 6 = hover/active highlight; see
+ * TART_THEMES' own doc comment for the full scope decision). Safe to
+ * call before or after canvas colors are set up -- disjoint pair
+ * numbers, no ordering dependency. */
+void tart_apply_theme(int idx) {
+    if (idx < 0 || (size_t)idx >= TART_THEME_COUNT) idx = 1; /* dark, prior hardcoded default */
+    const TartTheme *t = &TART_THEMES[idx];
+    short fg = (short)tart_xterm256_from_rgb(t->fg[0], t->fg[1], t->fg[2]);
+    short chrome_bg = (short)tart_xterm256_from_rgb(t->button_bg[0], t->button_bg[1], t->button_bg[2]);
+    short hi_bg = (short)tart_xterm256_from_rgb(t->select_bg[0], t->select_bg[1], t->select_bg[2]);
+    init_pair(5, fg, chrome_bg);
+    init_pair(6, fg, hi_bg);
+}
+
+/* Plain one-line text file, not JSON -- same reasoning .map/.tart's own
+ * formats already use in this project (C has no JSON parser lying
+ * around; a single key doesn't earn pulling one in). Shared path means
+ * switching the theme in TART carries into Wordsworn's next launch and
+ * back, same as Slate's own single ~/.slate/theme.json covers its own
+ * whole app. Missing/unreadable/unrecognized key -> default, never an
+ * error -- same fallback discipline tart_map_load's callers get. */
+static void tart_theme_path(char *out, size_t out_sz) {
+    const char *home = getenv("HOME");
+    snprintf(out, out_sz, "%s/.tart-theme", home ? home : "/tmp");
+}
+
+int tart_theme_load(void) {
+    char path[300];
+    tart_theme_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    char key[32] = {0};
+    if (!fgets(key, sizeof(key), f)) { fclose(f); return 1; }
+    fclose(f);
+    size_t len = strlen(key);
+    while (len > 0 && (key[len - 1] == '\n' || key[len - 1] == '\r')) key[--len] = '\0';
+    for (size_t i = 0; i < TART_THEME_COUNT; i++)
+        if (strcmp(TART_THEMES[i].key, key) == 0) return (int)i;
+    return 1;
+}
+
+void tart_theme_save(int idx) {
+    if (idx < 0 || (size_t)idx >= TART_THEME_COUNT) return;
+    char path[300];
+    tart_theme_path(path, sizeof(path));
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%s\n", TART_THEMES[idx].key);
+    fclose(f);
 }
 
 void tart_draw_help_overlay(App *app) {

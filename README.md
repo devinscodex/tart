@@ -127,7 +127,7 @@ A v1 file (no fps, no markers) loads as one frame of one layer, and a
 one-frame/one-layer save is still v1-shaped. The format stays line-oriented
 and diffable; ragged layer counts are padded with blank layers on load.
 
-## Map format (`.map`) — blocks, no editor UI yet
+## Map format (`.map`) — blocks + click-to-place editor
 
 A map composites many small `.tart` documents ("blocks" — grass, water, a
 campfire) onto a grid. Same line-oriented, diffable spirit as `.tart`:
@@ -181,6 +181,26 @@ preview is static (frame 0); `getch()` runs in plain blocking mode, no
 **Not built yet:** per-cell walkability (still a whole-block flag),
 resizing the map or adding/removing `BLOCKS` entries from inside the
 editor (hand-edit the `.map` file for that today).
+
+## UI themes
+
+10 named chrome palettes, ported from Slate (sibling project) so both
+apps read from the same visual language: Light, Dark (default), Solarized
+Dark/Light, Gruvbox Dark/Light, Flexoki Dark/Light, Mosscairn Dark/Light.
+`:theme` (or View menu) cycles to the next one; the choice is written to
+`~/.tart-theme` (one line, plain text) and shared with Wordsworn — switch
+it in either app, the other picks it up on its next launch. Wordsworn
+itself cycles with the `t` key in-game.
+
+Scope, on purpose: this reskins CHROME only — the menu bar and the
+hover/active highlight (TART's own pairs 5/6; Wordsworn's HUD divider bar
+reuses pair 5 the same way). It does not touch the drawing tools' own
+colors (pairs 1-4, each carries a specific functional meaning) or the
+256-color canvas ramp sprites/art are drawn in — a UI preference must
+never shift what a saved `.tart`/`.map` actually looks like. Each theme
+is stored as plain RGB and matched to its nearest xterm-256 pair at
+apply time (`tart_apply_theme` in `tart.h`) — one shared conversion
+function, not ten hand-picked magic pair numbers.
 
 ## Code map
 
