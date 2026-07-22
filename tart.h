@@ -498,36 +498,41 @@ wchar_t tart_map_composite(TartMap *map, int wx, int wy, unsigned char *out_colo
  * function, reused for every theme, instead of ten hand-picked
  * palettes of magic pair numbers.
  *
- * Scope, deliberately narrow: this reskins CHROME only -- the two
- * pairs TART's own init_app comments already call out by that name
- * (pair 5 "menu chrome", pair 6 "hover/open highlight"; Wordsworn
- * reuses pair 5 for its HUD divider bar the same way). It does NOT
- * touch pairs 1-4 (each carries a specific functional meaning --
- * onion-skin ghost dim, general text, inverse highlight, ruler/title
- * accent -- retheming those without being able to see the result
- * risks legibility regressions I can't verify from here) or the
- * 16+i canvas-color ramp (that's document/sprite content, must never
- * shift with a UI preference). fg drives both pairs' foreground;
- * button_bg is pair 5's background, select_bg is pair 6's. */
+ * Scope, widened 2026-07-22 (Devin, after seeing chrome-only theming
+ * look like Slate's own known gap -- Tk's native Windows menu popups
+ * not following its theme, per this struct's earlier comment):
+ * originally chrome-only (pairs 5/6), now covers the whole body --
+ * pairs 1-4 derive from the SAME theme instead of staying hardcoded,
+ * and `bkgd()` (in tart_apply_theme) fills every unpainted cell with
+ * `bg` too, so empty canvas space/panel background match instead of
+ * showing the terminal's own raw default through. Still does NOT
+ * touch the 16+i canvas-color ramp -- that's document/sprite content,
+ * must never shift with a UI preference. Deriving pairs 1/2/4's
+ * foreground from the theme's OWN fg/select_bg (chosen by Slate's
+ * authors for contrast against that exact bg) is actually SAFER than
+ * the old hardcoded cyan/white/yellow was on the 5 light-family
+ * themes, not riskier -- fixed light-colored text on a near-white bg
+ * was the real legibility risk, not this. */
 typedef struct {
     const char *key;    /* stable id: persisted pref file, ":theme" arg */
     const char *label;  /* menu/status display name */
+    unsigned char bg[3];
     unsigned char fg[3];
     unsigned char button_bg[3];
     unsigned char select_bg[3];
 } TartTheme;
 
 static const TartTheme TART_THEMES[] = {
-    { "light",          "Light",          {0,0,0},          {217,217,217}, {204,228,255} },
-    { "dark",           "Dark",           {232,232,232},    {60,60,60},    {58,90,122}   },
-    { "solarized_dark",  "Solarized Dark",  {131,148,150},   {7,54,66},     {38,139,210}  },
-    { "solarized_light", "Solarized Light", {101,123,131},   {238,232,213}, {38,139,210}  },
-    { "gruvbox_dark",    "Gruvbox Dark",    {235,219,178},   {60,56,54},    {131,165,152} },
-    { "gruvbox_light",   "Gruvbox Light",   {60,56,54},      {235,219,178}, {131,165,152} },
-    { "flexoki_dark",    "Flexoki Dark",    {230,228,217},   {40,39,38},    {32,94,166}   },
-    { "flexoki_light",   "Flexoki Light",   {16,15,15},      {242,240,229}, {32,94,166}   },
-    { "mosscairn_dark",  "Mosscairn Dark",  {232,228,208},   {9,57,71},     {163,183,42}  },
-    { "mosscairn_light", "Mosscairn Light", {28,26,22},      {138,129,111}, {88,118,58}   },
+    { "light",          "Light",          {217,217,217}, {0,0,0},          {217,217,217}, {204,228,255} },
+    { "dark",           "Dark",           {43,43,43},    {232,232,232},    {60,60,60},    {58,90,122}   },
+    { "solarized_dark",  "Solarized Dark",  {0,43,54},     {131,148,150},   {7,54,66},     {38,139,210}  },
+    { "solarized_light", "Solarized Light", {253,246,227}, {101,123,131},   {238,232,213}, {38,139,210}  },
+    { "gruvbox_dark",    "Gruvbox Dark",    {40,40,40},    {235,219,178},   {60,56,54},    {131,165,152} },
+    { "gruvbox_light",   "Gruvbox Light",   {251,241,199}, {60,56,54},      {235,219,178}, {131,165,152} },
+    { "flexoki_dark",    "Flexoki Dark",    {28,27,26},    {230,228,217},   {40,39,38},    {32,94,166}   },
+    { "flexoki_light",   "Flexoki Light",   {255,252,240}, {16,15,15},      {242,240,229}, {32,94,166}   },
+    { "mosscairn_dark",  "Mosscairn Dark",  {5,49,61},     {232,228,208},   {9,57,71},     {163,183,42}  },
+    { "mosscairn_light", "Mosscairn Light", {148,139,120}, {28,26,22},      {138,129,111}, {88,118,58}   },
 };
 #define TART_THEME_COUNT (sizeof(TART_THEMES) / sizeof(TART_THEMES[0]))
 
@@ -764,15 +769,11 @@ void init_app(App *app) {
     fflush(stdout);
     mouseinterval(0);
     start_color();
-    init_pair(1, COLOR_CYAN, COLOR_BLACK);
-    init_pair(2, COLOR_WHITE, COLOR_BLACK);
-    init_pair(3, COLOR_BLACK, COLOR_WHITE);
-    init_pair(4, COLOR_YELLOW, COLOR_BLACK);
-    /* Menu chrome (pair 5) and hover/open highlight (pair 6) -- default
-     * (253,236)/(255,24) dark-slate look now lives as TART_THEMES[1]
-     * "Dark" (tart_theme_load's own fallback), switchable via the
-     * ":theme" command or View menu. Loaded once here, applied both to
-     * ncurses (now) and the Viewport (below, after its own memset). */
+    /* Pairs 1-6 (was: hardcoded cyan/white/black-on-white/yellow chrome)
+     * now all come from TART_THEMES -- default "Dark" look lives as
+     * TART_THEMES[1] (tart_theme_load's own fallback), switchable via
+     * the ":theme" command or View menu. Loaded once here, applied both
+     * to ncurses (now) and the Viewport (below, after its own memset). */
     int loaded_theme_idx = tart_theme_load();
     tart_apply_theme(loaded_theme_idx);
     /* Canvas cell colors use dedicated 256-color palette, offset by 16 to
@@ -2441,19 +2442,37 @@ static int tart_xterm256_from_rgb(int r, int g, int b) {
     return (cube_dist <= gray_dist) ? cube_idx : (232 + gray_idx);
 }
 
-/* Applies TART_THEMES[idx] to the two pairs TART's own comments already
- * call "chrome" (5 = menu/panel bar, 6 = hover/active highlight; see
- * TART_THEMES' own doc comment for the full scope decision). Safe to
+/* Applies TART_THEMES[idx] to the whole body, not just chrome (see
+ * TART_THEMES' own doc comment for the 2026-07-22 scope widening):
+ *   pair 1 (onion-ghost dim / bold accent headers) -> select_bg-as-fg on bg
+ *   pair 2 (general panel/overlay/prompt text, the most common role)  -> fg on bg
+ *   pair 3 (inverse highlight; defined, currently unused anywhere)    -> bg-as-fg on fg
+ *   pair 4 (ruler ticks / anim-bar accent, was hardcoded yellow)      -> select_bg-as-fg on bg
+ *   pair 5 (menu/panel chrome bar)     -> fg on button_bg
+ *   pair 6 (hover/active highlight)    -> fg on select_bg
+ * `bkgd()` fills every cell render()'s per-frame erase() leaves blank
+ * (empty canvas space, panel margins) with `bg` too, so those match
+ * instead of showing the terminal's own raw default through. Safe to
  * call before or after canvas colors are set up -- disjoint pair
- * numbers, no ordering dependency. */
+ * numbers, no ordering dependency; safe before a screen exists too
+ * (bkgd is a no-op until initscr, callers needing it live call it
+ * again after -- not needed here since init_app calls this after
+ * initscr already). */
 void tart_apply_theme(int idx) {
     if (idx < 0 || (size_t)idx >= TART_THEME_COUNT) idx = 1; /* dark, prior hardcoded default */
     const TartTheme *t = &TART_THEMES[idx];
+    short bg = (short)tart_xterm256_from_rgb(t->bg[0], t->bg[1], t->bg[2]);
     short fg = (short)tart_xterm256_from_rgb(t->fg[0], t->fg[1], t->fg[2]);
+    short accent_fg = (short)tart_xterm256_from_rgb(t->select_bg[0], t->select_bg[1], t->select_bg[2]);
     short chrome_bg = (short)tart_xterm256_from_rgb(t->button_bg[0], t->button_bg[1], t->button_bg[2]);
     short hi_bg = (short)tart_xterm256_from_rgb(t->select_bg[0], t->select_bg[1], t->select_bg[2]);
+    init_pair(1, accent_fg, bg);
+    init_pair(2, fg, bg);
+    init_pair(3, bg, fg);
+    init_pair(4, accent_fg, bg);
     init_pair(5, fg, chrome_bg);
     init_pair(6, fg, hi_bg);
+    bkgd(COLOR_PAIR(2));
 }
 
 /* Plain one-line text file, not JSON -- same reasoning .map/.tart's own
