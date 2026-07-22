@@ -326,9 +326,16 @@ static void tart_execute_command(App *app, const char *name, const char *arg) {
     } else if (strcmp(name, "solo") == 0) {
         tart_anim_action(app, ANIM_SOLO);
     } else if (strcmp(name, "theme") == 0) {
-        app->viewport.theme_idx = (app->viewport.theme_idx + 1) % (int)TART_THEME_COUNT;
-        tart_apply_theme(app->viewport.theme_idx);
-        tart_theme_save(app->viewport.theme_idx);
+        int idx;
+        if (arg && *arg) {
+            idx = tart_theme_find(arg);
+            if (idx < 0) return;   /* typed name matched nothing -- leave it alone, don't surprise-cycle on a typo */
+        } else {
+            idx = (app->viewport.theme_idx + 1) % (int)TART_THEME_COUNT;
+        }
+        app->viewport.theme_idx = idx;
+        tart_apply_theme(idx);
+        tart_theme_save(idx);
     }
 }
 

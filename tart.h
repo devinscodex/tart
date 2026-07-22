@@ -85,7 +85,7 @@ static const TartCommand TART_COMMANDS[] = {
     { "layer-add", "la", "Add layer" },
     { "layer-del", NULL, "Delete layer" },
     { "solo", NULL, "Dim ink from other layers" },
-    { "theme", NULL, "Cycle UI chrome theme" },
+    { "theme", NULL, "Cycle theme, or jump to one by name (arg)" },
 };
 #define TART_COMMAND_COUNT (sizeof(TART_COMMANDS) / sizeof(TART_COMMANDS[0]))
 
@@ -539,6 +539,7 @@ static const TartTheme TART_THEMES[] = {
 void tart_apply_theme(int idx);
 int tart_theme_load(void);          /* reads ~/.tart-theme, clamps to a valid index, default 1 (dark) */
 void tart_theme_save(int idx);
+int tart_theme_find(const char *query); /* case-insensitive substring vs key/label; -1 = no match */
 
 void tart_draw_box(int x, int y, int w, int h);
 int tart_command_matches(const char *query, int match_idx[TART_COMMAND_COUNT]);
@@ -2512,6 +2513,34 @@ void tart_theme_save(int idx) {
     if (!f) return;
     fprintf(f, "%s\n", TART_THEMES[idx].key);
     fclose(f);
+}
+
+static bool tart_ci_contains(const char *haystack, const char *needle) {
+    size_t hn = strlen(haystack), nn = strlen(needle);
+    if (nn == 0) return true;
+    if (nn > hn) return false;
+    for (size_t i = 0; i + nn <= hn; i++) {
+        size_t j = 0;
+        for (; j < nn; j++)
+            if (tolower((unsigned char)haystack[i + j]) != tolower((unsigned char)needle[j])) break;
+        if (j == nn) return true;
+    }
+    return false;
+}
+
+/* ":theme <text>" selection, not just blind cycling -- matches against
+ * both key ("gruvbox_dark") and label ("Gruvbox Dark") so either the
+ * persisted-file spelling or the display name works. Reuses the same
+ * command-palette arg-passing every other argumented command (fps,
+ * grid, resize) already has; no new UI plumbing needed for this half
+ * of "picker" — just something worth typing into the one that exists. */
+int tart_theme_find(const char *query) {
+    if (!query || !*query) return -1;
+    for (size_t i = 0; i < TART_THEME_COUNT; i++) {
+        if (tart_ci_contains(TART_THEMES[i].key, query) || tart_ci_contains(TART_THEMES[i].label, query))
+            return (int)i;
+    }
+    return -1;
 }
 
 void tart_draw_help_overlay(App *app) {
