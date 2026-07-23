@@ -167,7 +167,7 @@ make spritetest
 ./spritetest --plain path/to/file.tart  # glyphs only
 ```
 
-Built 2026-07-23 because an agent (ascii-artist, drawing Wordsworn hub-test
+Built 2026-07-23 because an agent (Mason, né ascii-artist, drawing Wordsworn hub-test
 assets) had no way to see its own output — every prior verification was
 structural only (row/column counts, marker well-formedness), never visual.
 Same gap `maptest` already solved for `.map` files; this closes it for
