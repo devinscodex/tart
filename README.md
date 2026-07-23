@@ -154,6 +154,26 @@ a headless harness that loads it, prints two composited frames to stdout,
 and exits 1 on any load failure — no ncurses/terminal needed, good for a
 quick regression check after touching the loader.
 
+`make spritetest` builds a headless harness for a single `.tart` document
+(sprite, scene, or animation) — the single-doc equivalent of `maptest`
+above. Loads via `tart_load_doc`, dumps every frame as plain text via
+`tart_composite`, no ncurses/terminal needed. Real ANSI-256 color by
+default (straight from the file's `COLOR` block — same xterm-256 indices
+the format already stores), `--plain` for glyph-only output:
+
+```
+make spritetest
+./spritetest path/to/file.tart          # colored
+./spritetest --plain path/to/file.tart  # glyphs only
+```
+
+Built 2026-07-23 because an agent (ascii-artist, drawing Wordsworn hub-test
+assets) had no way to see its own output — every prior verification was
+structural only (row/column counts, marker well-formedness), never visual.
+Same gap `maptest` already solved for `.map` files; this closes it for
+plain sprites too. Use it to sanity-check any hand-authored or
+agent-authored `.tart` file before trusting it looks right.
+
 `make mapedit` builds `mapedit`, a click-to-place authoring mode for
 `.map` files. Deliberately a separate small binary rather than a mode
 bolted onto `tart` itself — a map is a grid of block *references*, not

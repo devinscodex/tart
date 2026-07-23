@@ -11,7 +11,7 @@ $(TARGET): $(SRC) tart.h
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LIBS)
 
 clean:
-	rm -f $(TARGET) maptest mapedit
+	rm -f $(TARGET) maptest mapedit spritetest
 
 run: $(TARGET)
 	./$(TARGET)
@@ -22,4 +22,7 @@ maptest: maptest.c tart.h
 mapedit: mapedit.c tart.h
 	$(CC) $(CFLAGS) -o $@ mapedit.c $(LIBS)
 
-.PHONY: all clean run maptest mapedit
+spritetest: spritetest.c tart.h
+	$(CC) $(CFLAGS) -o $@ spritetest.c $(LIBS)
+
+.PHONY: all clean run maptest mapedit spritetest
